@@ -1036,10 +1036,17 @@ impl CentralPanel {
 }
 
 #[cfg(feature = "async")]
-pub struct AsyncClosure<'s, 'l: 's, R>(futures::future::BoxFuture<'s, R>, std::marker::PhantomData<&'l R>);
+pub struct AsyncClosure<'s, 'l: 's, R>(
+    futures::future::BoxFuture<'s, R>,
+    std::marker::PhantomData<&'l R>,
+);
 
+#[cfg(feature = "async")]
 impl<'s, 'l, R> AsyncClosure<'s, 'l, R> {
-    pub fn new<F>(f: F) -> Self where F: futures::Future<Output=R> + Send + 's {
+    pub fn new<F>(f: F) -> Self
+    where
+        F: futures::Future<Output = R> + Send + 's,
+    {
         Self(Box::pin(f), std::marker::PhantomData)
     }
 }
@@ -1061,15 +1068,12 @@ impl CentralPanel {
     async fn show_inside_dyn_async<'a, R: 'a>(
         self,
         ui: &'_ mut Ui,
-        add_contents: impl 'a  + for<'b> FnOnce(&'b mut Ui) -> AsyncClosure<'b, 'a, R>,
-    ) -> InnerResponse<R>
-    {
+        add_contents: impl 'a + for<'b> FnOnce(&'b mut Ui) -> AsyncClosure<'b, 'a, R>,
+    ) -> InnerResponse<R> {
         let Self { frame } = self;
 
         let panel_rect = ui.available_rect_before_wrap();
-        let mut panel_ui = std::rc::Rc::new(
-            ui.child_ui(panel_rect, Layout::top_down(Align::Min),
-        ));
+        let mut panel_ui = std::rc::Rc::new(ui.child_ui(panel_rect, Layout::top_down(Align::Min)));
 
         let frame = frame.unwrap_or_else(|| Frame::central_panel(ui.style()));
         frame
@@ -1105,7 +1109,7 @@ impl CentralPanel {
     pub async fn show_async<'a, R: 'a>(
         self,
         ctx: &'a Context,
-        add_contents: impl 'a  + for<'b> FnOnce(&'b mut Ui) -> AsyncClosure<'b, 'a, R>,
+        add_contents: impl 'a + for<'b> FnOnce(&'b mut Ui) -> AsyncClosure<'b, 'a, R>,
     ) -> InnerResponse<R> {
         self.show_dyn_async(ctx, add_contents).await
     }
@@ -1123,9 +1127,8 @@ impl CentralPanel {
     async fn show_dyn_async<'a, R: 'a>(
         self,
         ctx: &'_ Context,
-        add_contents: impl 'a  + for<'b> FnOnce(&'b mut Ui) -> AsyncClosure<'b, 'a, R>,
-    ) -> InnerResponse<R>
-    {
+        add_contents: impl 'a + for<'b> FnOnce(&'b mut Ui) -> AsyncClosure<'b, 'a, R>,
+    ) -> InnerResponse<R> {
         let available_rect = ctx.available_rect();
         let layer_id = LayerId::background();
         let id = Id::new((ctx.viewport_id(), "central_panel"));

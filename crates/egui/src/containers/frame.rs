@@ -217,6 +217,9 @@ impl Frame {
     }
 }
 
+#[cfg(feature = "async")]
+use std::rc::Rc;
+
 // ----------------------------------------------------------------------------
 
 pub struct Prepared {
@@ -233,7 +236,50 @@ pub struct Prepared {
     pub content_ui: Ui,
 }
 
+#[cfg(feature = "async")]
+pub struct PreparedAsync {
+    /// The frame that was prepared.
+    ///
+    /// The margin has already been read and used,
+    /// but the rest of the fields may be modified.
+    pub frame: Frame,
+
+    /// This is where we will insert the frame shape so it ends up behind the content.
+    where_to_put_background: ShapeIdx,
+
+    /// Add your widgets to this UI so it ends up within the frame.
+    pub content_ui: Option<Rc<Ui>>,
+}
+
 impl Frame {
+    #[cfg(feature = "async")]
+    /// Begin a dynamically colored frame.
+    ///
+    /// This is a more advanced API.
+    /// Usually you want to use [`Self::show`] instead.
+    ///
+    /// See docs for [`Frame`] for an example.
+    pub fn begin_async(self, ui: &mut Ui) -> PreparedAsync {
+        let where_to_put_background = ui.painter().add(Shape::Noop);
+        let outer_rect_bounds = ui.available_rect_before_wrap();
+
+        let mut inner_rect = outer_rect_bounds - self.outer_margin - self.inner_margin;
+
+        // Make sure we don't shrink to the negative:
+        inner_rect.max.x = inner_rect.max.x.max(inner_rect.min.x);
+        inner_rect.max.y = inner_rect.max.y.max(inner_rect.min.y);
+
+        let content_ui = ui.child_ui(inner_rect, *ui.layout());
+
+        // content_ui.set_clip_rect(outer_rect_bounds.shrink(self.stroke.width * 0.5)); // Can't do this since we don't know final size yet
+
+        PreparedAsync {
+            frame: self,
+            where_to_put_background,
+            content_ui: Some(Rc::new(content_ui)),
+        }
+    }
+
     /// Begin a dynamically colored frame.
     ///
     /// This is a more advanced API.
@@ -262,8 +308,39 @@ impl Frame {
     }
 
     /// Show the given ui surrounded by this frame.
+    #[cfg(feature = "async")]
+    pub async fn show_async<R, F>(
+        self,
+        ui: &mut Rc<Ui>,
+        add_contents: impl FnOnce(Rc<Ui>) -> F,
+    ) -> InnerResponse<R>
+    where
+        F: std::future::Future<Output = (R, Rc<Ui>)>,
+    {
+        self.show_dyn_async(ui, add_contents).await
+    }
+
+    /// Show the given ui surrounded by this frame.
     pub fn show<R>(self, ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> InnerResponse<R> {
         self.show_dyn(ui, Box::new(add_contents))
+    }
+
+    #[cfg(feature = "async")]
+    async fn show_dyn_async<R, F>(
+        self,
+        ui: &mut Rc<Ui>,
+        add_contents: impl FnOnce(Rc<Ui>) -> F,
+    ) -> InnerResponse<R>
+    where
+        F: std::future::Future<Output = (R, Rc<Ui>)>,
+    {
+        let ui = Rc::<ui::Ui>::get_mut(ui).unwrap();
+        let mut prepared = self.begin_async(ui);
+        let ui2 = prepared.content_ui.take().unwrap();
+        let (ret, ui3) = add_contents(ui2).await;
+        prepared.content_ui.replace(ui3);
+        let response = prepared.end(ui);
+        InnerResponse::new(ret, response)
     }
 
     fn show_dyn<'c, R>(
@@ -320,6 +397,41 @@ impl Prepared {
     /// This can be called before or after [`Self::allocate_space`].
     pub fn paint(&self, ui: &Ui) {
         let paint_rect = self.content_ui.min_rect() + self.frame.inner_margin;
+
+        if ui.is_rect_visible(paint_rect) {
+            let shape = self.frame.paint(paint_rect);
+            ui.painter().set(self.where_to_put_background, shape);
+        }
+    }
+
+    /// Convenience for calling [`Self::allocate_space`] and [`Self::paint`].
+    pub fn end(self, ui: &mut Ui) -> Response {
+        self.paint(ui);
+        self.allocate_space(ui)
+    }
+}
+
+impl PreparedAsync {
+    fn content_with_margin(&self) -> Rect {
+        self.content_ui.as_ref().unwrap().min_rect()
+            + self.frame.inner_margin
+            + self.frame.outer_margin
+    }
+
+    /// Allocate the space that was used by [`Self::content_ui`].
+    ///
+    /// This MUST be called, or the parent ui will not know how much space this widget used.
+    ///
+    /// This can be called before or after [`Self::paint`].
+    pub fn allocate_space(&self, ui: &mut Ui) -> Response {
+        ui.allocate_rect(self.content_with_margin(), Sense::hover())
+    }
+
+    /// Paint the frame.
+    ///
+    /// This can be called before or after [`Self::allocate_space`].
+    pub fn paint(&self, ui: &Ui) {
+        let paint_rect = self.content_ui.as_ref().unwrap().min_rect() + self.frame.inner_margin;
 
         if ui.is_rect_visible(paint_rect) {
             let shape = self.frame.paint(paint_rect);

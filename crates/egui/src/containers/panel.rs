@@ -329,6 +329,15 @@ impl SidePanel {
         inner_response
     }
 
+    #[cfg(feature = "async")]
+    pub async fn show_async<R>(
+        self,
+        ctx: &Context,
+        add_contents: impl FnOnce(&mut Ui) -> R,
+    ) -> InnerResponse<R> {
+        self.show_dyn(ctx, Box::new(add_contents))
+    }
+
     /// Show the panel at the top level.
     pub fn show<R>(
         self,
@@ -1026,6 +1035,25 @@ impl CentralPanel {
     }
 }
 
+#[cfg(feature = "async")]
+pub struct AsyncClosure<'s, 'l: 's, R>(
+    futures::future::BoxFuture<'s, R>,
+    std::marker::PhantomData<&'l R>,
+);
+
+#[cfg(feature = "async")]
+impl<'s, 'l, R> AsyncClosure<'s, 'l, R> {
+    pub fn new<F>(f: F) -> Self
+    where
+        F: futures::Future<Output = R> + Send + 's,
+    {
+        Self(Box::pin(f), std::marker::PhantomData)
+    }
+}
+
+#[cfg(feature = "async")]
+use std::rc::Rc;
+
 impl CentralPanel {
     /// Show the panel inside a [`Ui`].
     pub fn show_inside<R>(
@@ -1034,6 +1062,29 @@ impl CentralPanel {
         add_contents: impl FnOnce(&mut Ui) -> R,
     ) -> InnerResponse<R> {
         self.show_inside_dyn(ui, Box::new(add_contents))
+    }
+
+    /// Show the panel inside a [`Ui`].
+    async fn show_inside_dyn_async<'a, R: 'a>(
+        self,
+        ui: &'_ mut Ui,
+        add_contents: impl 'a + for<'b> FnOnce(&'b mut Ui) -> AsyncClosure<'b, 'a, R>,
+    ) -> InnerResponse<R> {
+        let Self { frame } = self;
+
+        let panel_rect = ui.available_rect_before_wrap();
+        let mut panel_ui = std::rc::Rc::new(ui.child_ui(panel_rect, Layout::top_down(Align::Min)));
+
+        let frame = frame.unwrap_or_else(|| Frame::central_panel(ui.style()));
+        frame
+            .show_async(&mut panel_ui, |mut ui| async move {
+                let rect = ui.max_rect();
+                let ui2 = Rc::<ui::Ui>::get_mut(&mut ui).unwrap();
+                ui2.expand_to_include_rect(rect); // Expand frame to include it all
+                let r = add_contents(ui2).0.await;
+                (r, ui)
+            })
+            .await
     }
 
     /// Show the panel inside a [`Ui`].
@@ -1054,6 +1105,15 @@ impl CentralPanel {
         })
     }
 
+    #[cfg(feature = "async")]
+    pub async fn show_async<'a, R: 'a>(
+        self,
+        ctx: &'a Context,
+        add_contents: impl 'a + for<'b> FnOnce(&'b mut Ui) -> AsyncClosure<'b, 'a, R>,
+    ) -> InnerResponse<R> {
+        self.show_dyn_async(ctx, add_contents).await
+    }
+
     /// Show the panel at the top level.
     pub fn show<R>(
         self,
@@ -1061,6 +1121,29 @@ impl CentralPanel {
         add_contents: impl FnOnce(&mut Ui) -> R,
     ) -> InnerResponse<R> {
         self.show_dyn(ctx, Box::new(add_contents))
+    }
+
+    #[cfg(feature = "async")]
+    async fn show_dyn_async<'a, R: 'a>(
+        self,
+        ctx: &'_ Context,
+        add_contents: impl 'a + for<'b> FnOnce(&'b mut Ui) -> AsyncClosure<'b, 'a, R>,
+    ) -> InnerResponse<R> {
+        let available_rect = ctx.available_rect();
+        let layer_id = LayerId::background();
+        let id = Id::new((ctx.viewport_id(), "central_panel"));
+
+        let clip_rect = ctx.screen_rect();
+        let mut panel_ui = Ui::new(ctx.clone(), layer_id, id, available_rect, clip_rect);
+
+        let inner_response = self
+            .show_inside_dyn_async(&mut panel_ui, add_contents)
+            .await;
+
+        // Only inform ctx about what we actually used, so we can shrink the native window to fit.
+        ctx.frame_state_mut(|state| state.allocate_central_panel(inner_response.response.rect));
+
+        inner_response
     }
 
     /// Show the panel at the top level.

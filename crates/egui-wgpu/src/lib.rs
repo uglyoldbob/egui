@@ -241,7 +241,7 @@ impl RenderState {
                     } else {
                         request_adapter(
                             instance,
-                            power_preference,
+                            wgpu::PowerPreference::None,
                             compatible_surface,
                             &available_adapters,
                         )

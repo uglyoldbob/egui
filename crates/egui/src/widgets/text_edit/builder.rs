@@ -518,13 +518,6 @@ impl TextEdit<'_> {
 
         let layouter = layouter.unwrap_or(&mut default_layouter);
 
-        let mut galley = layouter(ui, text.as_str(), wrap_width);
-
-        let desired_inner_width = if clip_text {
-            wrap_width // visual clipping with scroll in singleline input.
-        } else {
-            galley.size().x.max(wrap_width)
-        };
         let desired_height = (desired_height_rows.at_least(1) as f32) * row_height;
         let desired_inner_size = vec2(desired_inner_width, galley.size().y.max(desired_height));
         let desired_outer_size = (desired_inner_size + margin.sum()).at_least(min_size);
@@ -560,7 +553,6 @@ impl TextEdit<'_> {
             Sense::hover()
         };
         let mut response = ui.interact(outer_rect, id, sense);
-        response.intrinsic_size = Some(Vec2::new(desired_width, desired_outer_size.y));
 
         let mut state = TextEditState::load(ui.ctx(), id).unwrap_or_default();
         let mut cursor_range = None;

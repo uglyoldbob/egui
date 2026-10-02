@@ -2,12 +2,13 @@
 
 use crate::util::fixed_cache::FixedCache;
 use crate::{
-    epaint, lerp, remap_clamp, Area, Context, DragValue, Frame, Id, Key, Order, Painter, Response,
-    Sense, Ui, UiKind, Widget, WidgetInfo, WidgetType,
+    Context, DragValue, Id, Painter, Popup, PopupCloseBehavior, Response, Sense, Ui, Widget as _,
+    WidgetInfo, WidgetType, epaint, lerp, remap_clamp,
 };
 use epaint::{
+    Mesh, Rect, Shape, Stroke, StrokeKind, Vec2,
     ecolor::{Color32, Hsva, HsvaGamma, Rgba},
-    pos2, vec2, Mesh, Rect, Shape, Stroke, Vec2,
+    pos2, vec2,
 };
 
 fn contrast_color(color: impl Into<Rgba>) -> Color32 {
@@ -84,7 +85,29 @@ pub fn show_color_at(painter: &Painter, color: Color32, rect: Rect) {
     }
 }
 
-fn color_button(ui: &mut Ui, color: Color32, open: bool) -> Response {
+/// Show a color with background checkers to demonstrate transparency (if any).
+fn show_srgba_unmultiplied(ui: &mut Ui, srgba: [u8; 4], desired_size: Vec2) -> Response {
+    let (rect, response) = ui.allocate_at_least(desired_size, Sense::hover());
+    if ui.is_rect_visible(rect) {
+        show_srgba_unmultiplied_at(ui.painter(), srgba, rect);
+    }
+    response
+}
+
+/// Show a color with background checkers to demonstrate transparency (if any).
+fn show_srgba_unmultiplied_at(painter: &Painter, [r, g, b, a]: [u8; 4], rect: Rect) {
+    if a == 255 {
+        painter.rect_filled(rect, 0.0, Color32::from_rgb(r, g, b));
+    } else {
+        background_checkers(painter, rect);
+        let left = Rect::from_min_max(rect.left_top(), rect.center_bottom());
+        let right = Rect::from_min_max(rect.center_top(), rect.right_bottom());
+        painter.rect_filled(left, 0.0, Color32::from_rgba_unmultiplied(r, g, b, a));
+        painter.rect_filled(right, 0.0, Color32::from_rgb(r, g, b));
+    }
+}
+
+fn color_button(ui: &mut Ui, srgba: [u8; 4], open: bool) -> Response {
     let size = ui.spacing().interact_size;
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     response.widget_info(|| WidgetInfo::new(WidgetType::ColorButton));
@@ -97,18 +120,23 @@ fn color_button(ui: &mut Ui, color: Color32, open: bool) -> Response {
         };
         let rect = rect.expand(visuals.expansion);
 
-        show_color_at(ui.painter(), color, rect);
+        let stroke_width = 1.0;
+        show_srgba_unmultiplied_at(ui.painter(), srgba, rect.shrink(stroke_width));
 
-        let rounding = visuals.rounding.at_most(2.0); // Can't do more rounding because the background grid doesn't do any rounding
-        ui.painter()
-            .rect_stroke(rect, rounding, (2.0, visuals.bg_fill)); // fill is intentional, because default style has no border
+        let corner_radius = visuals.corner_radius.at_most(2); // Can't do more rounding because the background grid doesn't do any rounding
+        ui.painter().rect_stroke(
+            rect,
+            corner_radius,
+            (stroke_width, visuals.bg_fill), // Using fill for stroke is intentional, because default style has no border
+            StrokeKind::Inside,
+        );
     }
 
     response
 }
 
 fn color_slider_1d(ui: &mut Ui, value: &mut f32, color_at: impl Fn(f32) -> Color32) -> Response {
-    #![allow(clippy::identity_op)]
+    #![expect(clippy::identity_op)]
 
     let desired_size = vec2(ui.spacing().slider_width, ui.spacing().interact_size.y);
     let (rect, response) = ui.allocate_at_least(desired_size, Sense::click_and_drag());
@@ -139,7 +167,8 @@ fn color_slider_1d(ui: &mut Ui, value: &mut f32, color_at: impl Fn(f32) -> Color
             ui.painter().add(Shape::mesh(mesh));
         }
 
-        ui.painter().rect_stroke(rect, 0.0, visuals.bg_stroke); // outline
+        ui.painter()
+            .rect_stroke(rect, 0.0, visuals.bg_stroke, StrokeKind::Inside); // outline
 
         {
             // Show where the slider is at:
@@ -165,8 +194,11 @@ fn color_slider_1d(ui: &mut Ui, value: &mut f32, color_at: impl Fn(f32) -> Color
 /// * `x_value` - X axis, either saturation or value (0.0-1.0).
 /// * `y_value` - Y axis, either saturation or value (0.0-1.0).
 /// * `color_at` - A function that dictates how the mix of saturation and value will be displayed in the 2d slider.
-/// E.g.: `|x_value, y_value| HsvaGamma { h: 1.0, s: x_value, v: y_value, a: 1.0 }.into()` displays the colors as follows: top-left: white \[s: 0.0, v: 1.0], top-right: fully saturated color \[s: 1.0, v: 1.0], bottom-right: black \[s: 0.0, v: 1.0].
 ///
+/// e.g.: `|x_value, y_value| HsvaGamma { h: 1.0, s: x_value, v: y_value, a: 1.0 }.into()` displays the colors as follows:
+/// * top-left: white `[s: 0.0, v: 1.0]`
+/// * top-right: fully saturated color `[s: 1.0, v: 1.0]`
+/// * bottom-right: black `[s: 0.0, v: 1.0].`
 fn color_slider_2d(
     ui: &mut Ui,
     x_value: &mut f32,
@@ -205,7 +237,8 @@ fn color_slider_2d(
         }
         ui.painter().add(Shape::mesh(mesh)); // fill
 
-        ui.painter().rect_stroke(rect, 0.0, visuals.bg_stroke); // outline
+        ui.painter()
+            .rect_stroke(rect, 0.0, visuals.bg_stroke, StrokeKind::Inside); // outline
 
         // Show where the slider is at:
         let x = lerp(rect.left()..=rect.right(), *x_value);
@@ -303,7 +336,12 @@ fn color_picker_hsvag_2d(ui: &mut Ui, hsvag: &mut HsvaGamma, alpha: Alpha) {
     }
 
     let current_color_size = vec2(ui.spacing().slider_width, ui.spacing().interact_size.y);
-    show_color(ui, *hsvag, current_color_size).on_hover_text("Selected color");
+    show_srgba_unmultiplied(
+        ui,
+        Hsva::from(*hsvag).to_srgba_unmultiplied(),
+        current_color_size,
+    )
+    .on_hover_text("Selected color");
 
     if alpha == Alpha::BlendOrAdditive {
         let a = &mut hsvag.a;
@@ -367,7 +405,7 @@ fn color_picker_hsvag_2d(ui: &mut Ui, hsvag: &mut HsvaGamma, alpha: Alpha) {
 }
 
 fn input_type_button_ui(ui: &mut Ui) {
-    let mut input_type = ui.ctx().style().visuals.numeric_color_space;
+    let mut input_type = ui.global_style().visuals.numeric_color_space;
     if input_type.toggle_button_ui(ui).changed() {
         ui.ctx().all_styles_mut(|s| {
             s.visuals.numeric_color_space = input_type;
@@ -391,9 +429,9 @@ fn srgba_edit_ui(ui: &mut Ui, [r, g, b, a]: &mut [u8; 4], alpha: Alpha) -> bool 
             .clicked()
         {
             if alpha == Alpha::Opaque {
-                ui.ctx().copy_text(format!("{r}, {g}, {b}"));
+                ui.copy_text(format!("{r}, {g}, {b}"));
             } else {
-                ui.ctx().copy_text(format!("{r}, {g}, {b}, {a}"));
+                ui.copy_text(format!("{r}, {g}, {b}, {a}"));
             }
         }
         edited |= DragValue::new(r).speed(0.5).prefix("R ").ui(ui).changed();
@@ -432,10 +470,9 @@ fn rgba_edit_ui(ui: &mut Ui, [r, g, b, a]: &mut [f32; 4], alpha: Alpha) -> bool 
             .clicked()
         {
             if alpha == Alpha::Opaque {
-                ui.ctx().copy_text(format!("{r:.03}, {g:.03}, {b:.03}"));
+                ui.copy_text(format!("{r:.03}, {g:.03}, {b:.03}"));
             } else {
-                ui.ctx()
-                    .copy_text(format!("{r:.03}, {g:.03}, {b:.03}, {a:.03}"));
+                ui.copy_text(format!("{r:.03}, {g:.03}, {b:.03}, {a:.03}"));
             }
         }
 
@@ -480,40 +517,23 @@ pub fn color_picker_color32(ui: &mut Ui, srgba: &mut Color32, alpha: Alpha) -> b
 
 pub fn color_edit_button_hsva(ui: &mut Ui, hsva: &mut Hsva, alpha: Alpha) -> Response {
     let popup_id = ui.auto_id_with("popup");
-    let open = ui.memory(|mem| mem.is_popup_open(popup_id));
-    let mut button_response = color_button(ui, (*hsva).into(), open);
+    let open = Popup::is_id_open(ui.ctx(), popup_id);
+    let mut button_response = color_button(ui, hsva.to_srgba_unmultiplied(), open);
     if ui.style().explanation_tooltips {
         button_response = button_response.on_hover_text("Click to edit color");
     }
 
-    if button_response.clicked() {
-        ui.memory_mut(|mem| mem.toggle_popup(popup_id));
-    }
-
     const COLOR_SLIDER_WIDTH: f32 = 275.0;
 
-    // TODO(emilk): make it easier to show a temporary popup that closes when you click outside it
-    if ui.memory(|mem| mem.is_popup_open(popup_id)) {
-        let area_response = Area::new(popup_id)
-            .kind(UiKind::Picker)
-            .order(Order::Foreground)
-            .fixed_pos(button_response.rect.max)
-            .show(ui.ctx(), |ui| {
-                ui.spacing_mut().slider_width = COLOR_SLIDER_WIDTH;
-                Frame::popup(ui.style()).show(ui, |ui| {
-                    if color_picker_hsva_2d(ui, hsva, alpha) {
-                        button_response.mark_changed();
-                    }
-                });
-            })
-            .response;
-
-        if !button_response.clicked()
-            && (ui.input(|i| i.key_pressed(Key::Escape)) || area_response.clicked_elsewhere())
-        {
-            ui.memory_mut(|mem| mem.close_popup());
-        }
-    }
+    Popup::menu(&button_response)
+        .id(popup_id)
+        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.spacing_mut().slider_width = COLOR_SLIDER_WIDTH;
+            if color_picker_hsva_2d(ui, hsva, alpha) {
+                button_response.mark_changed();
+            }
+        });
 
     button_response
 }

@@ -1,5 +1,8 @@
+use core::{any::Any, iter::FusedIterator};
 use std::sync::Arc;
-use std::{any::Any, iter::FusedIterator};
+
+use crate::widget_style::Classes;
+use epaint::Color32;
 
 use crate::{Direction, Frame, Id, Rect};
 
@@ -12,17 +15,20 @@ pub enum UiKind {
     /// A [`crate::CentralPanel`].
     CentralPanel,
 
-    /// A left [`crate::SidePanel`].
+    /// A left [`crate::Panel`].
     LeftPanel,
 
-    /// A right [`crate::SidePanel`].
+    /// A right [`crate::Panel`].
     RightPanel,
 
-    /// A top [`crate::TopBottomPanel`].
+    /// A top [`crate::Panel`].
     TopPanel,
 
-    /// A bottom [`crate::TopBottomPanel`].
+    /// A bottom [`crate::Panel`].
     BottomPanel,
+
+    /// A modal [`crate::Modal`].
+    Modal,
 
     /// A [`crate::Frame`].
     Frame,
@@ -50,6 +56,9 @@ pub enum UiKind {
 
     /// An [`crate::Area`] that is not of any other kind.
     GenericArea,
+
+    /// A collapsible container, e.g. a [`crate::CollapsingHeader`].
+    Collapsible,
 }
 
 impl UiKind {
@@ -78,10 +87,12 @@ impl UiKind {
             | Self::Frame
             | Self::ScrollArea
             | Self::Resize
+            | Self::Collapsible
             | Self::TableCell => false,
 
             Self::Window
             | Self::Menu
+            | Self::Modal
             | Self::Popup
             | Self::Tooltip
             | Self::Picker
@@ -201,7 +212,8 @@ pub struct UiStack {
     pub layout_direction: Direction,
     pub min_rect: Rect,
     pub max_rect: Rect,
-    pub parent: Option<Arc<UiStack>>,
+    pub parent: Option<Arc<Self>>,
+    pub classes: Classes,
 }
 
 // these methods act on this specific node
@@ -225,7 +237,13 @@ impl UiStack {
     /// Is this [`crate::Ui`] a panel?
     #[inline]
     pub fn is_panel_ui(&self) -> bool {
-        self.kind().map_or(false, |kind| kind.is_panel())
+        self.kind().is_some_and(|kind| kind.is_panel())
+    }
+
+    /// Is this [`crate::Ui`] an [`crate::Area`]?
+    #[inline]
+    pub fn is_area_ui(&self) -> bool {
+        self.kind().is_some_and(|kind| kind.is_area())
     }
 
     /// Is this a root [`crate::Ui`], i.e. created with [`crate::Ui::new()`]?
@@ -239,12 +257,31 @@ impl UiStack {
     pub fn has_visible_frame(&self) -> bool {
         !self.info.frame.stroke.is_empty()
     }
+
+    /// The background color of this [`crate::Ui`].
+    ///
+    /// This blend together all [`Frame::fill`] colors
+    /// up to the root.
+    #[inline]
+    pub fn bg_color(&self) -> Color32 {
+        let mut total = Color32::TRANSPARENT;
+        for node in self.iter() {
+            let fill = node.frame().fill;
+            if fill != Color32::TRANSPARENT {
+                total = fill.blend(total);
+                if total.is_opaque() {
+                    break;
+                }
+            }
+        }
+        total
+    }
 }
 
 // these methods act on the entire stack
 impl UiStack {
     /// Return an iterator that walks the stack from this node to the root.
-    #[allow(clippy::iter_without_into_iter)]
+    #[expect(clippy::iter_without_into_iter)]
     pub fn iter(&self) -> UiStackIterator<'_> {
         UiStackIterator { next: Some(self) }
     }
@@ -275,4 +312,4 @@ impl<'a> Iterator for UiStackIterator<'a> {
     }
 }
 
-impl<'a> FusedIterator for UiStackIterator<'a> {}
+impl FusedIterator for UiStackIterator<'_> {}

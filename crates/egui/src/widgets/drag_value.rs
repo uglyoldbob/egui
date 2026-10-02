@@ -1,11 +1,10 @@
-#![allow(clippy::needless_pass_by_value)] // False positives with `impl ToString`
-
-use std::{cmp::Ordering, ops::RangeInclusive};
-
 use crate::{
-    emath, text, Button, CursorIcon, Key, Modifiers, NumExt, Response, RichText, Sense, TextEdit,
-    TextWrapMode, Ui, Widget, WidgetInfo, MINUS_CHAR_STR,
+    Atom, AtomExt as _, AtomKind, Atoms, Button, CursorIcon, Id, IntoAtoms, Key, MINUS_CHAR_STR,
+    Modifiers, NumExt as _, Response, RichText, Sense, TextEdit, TextWrapMode, Ui, Widget,
+    WidgetInfo, emath, text,
 };
+use core::{cmp::Ordering, ops::RangeInclusive};
+use emath::Vec2;
 
 // ----------------------------------------------------------------------------
 
@@ -26,6 +25,24 @@ fn set(get_set_value: &mut GetSetValue<'_>, value: f64) {
     (get_set_value)(Some(value));
 }
 
+// ----------------------------------------------------------------------------
+
+/// What the user has typed into a [`DragValue`] that is being edited as text.
+///
+/// Stored in [`crate::Memory::data`] between frames, because the text can be
+/// something that doesn't (yet) parse to a number, e.g. `"1."` or `"-"`.
+#[derive(Clone, Default)]
+struct EditState {
+    /// The text the user is editing.
+    text: String,
+
+    /// The value of the [`DragValue`] the last time we stored `text`.
+    ///
+    /// If the value has changed since then it was changed by something other than
+    /// this widget, and `text` is stale and must not be written back to the value.
+    value: f64,
+}
+
 /// A numeric value that you can change by dragging the number. More compact than a [`crate::Slider`].
 ///
 /// ```
@@ -38,8 +55,7 @@ fn set(get_set_value: &mut GetSetValue<'_>, value: f64) {
 pub struct DragValue<'a> {
     get_set_value: GetSetValue<'a>,
     speed: f64,
-    prefix: String,
-    suffix: String,
+    atoms: Atoms<'a>,
     range: RangeInclusive<f64>,
     clamp_existing_to_range: bool,
     min_decimals: usize,
@@ -50,6 +66,8 @@ pub struct DragValue<'a> {
 }
 
 impl<'a> DragValue<'a> {
+    const ATOM_ID: &'static str = "drag_item";
+
     pub fn new<Num: emath::Numeric>(value: &'a mut Num) -> Self {
         let slf = Self::from_get_set(move |v: Option<f64>| {
             if let Some(v) = v {
@@ -66,11 +84,12 @@ impl<'a> DragValue<'a> {
     }
 
     pub fn from_get_set(get_set_value: impl 'a + FnMut(Option<f64>) -> f64) -> Self {
+        let atoms = Atoms::new(Atom::custom(Id::new(Self::ATOM_ID), Vec2::ZERO).atom_grow(true));
+
         Self {
             get_set_value: Box::new(get_set_value),
             speed: 1.0,
-            prefix: Default::default(),
-            suffix: Default::default(),
+            atoms,
             range: f64::NEG_INFINITY..=f64::INFINITY,
             clamp_existing_to_range: true,
             min_decimals: 0,
@@ -88,16 +107,6 @@ impl<'a> DragValue<'a> {
     pub fn speed(mut self, speed: impl Into<f64>) -> Self {
         self.speed = speed.into();
         self
-    }
-
-    /// Sets valid range for the value.
-    ///
-    /// By default all values are clamped to this range, even when not interacted with.
-    /// You can change this behavior by passing `false` to [`Self::clamp_existing_to_range`].
-    #[deprecated = "Use `range` instead"]
-    #[inline]
-    pub fn clamp_range<Num: emath::Numeric>(self, range: RangeInclusive<Num>) -> Self {
-        self.range(range)
     }
 
     /// Sets valid range for dragging the value.
@@ -156,23 +165,17 @@ impl<'a> DragValue<'a> {
         self
     }
 
-    #[inline]
-    #[deprecated = "Renamed clamp_existing_to_range"]
-    pub fn clamp_to_range(self, clamp_to_range: bool) -> Self {
-        self.clamp_existing_to_range(clamp_to_range)
-    }
-
     /// Show a prefix before the number, e.g. "x: "
     #[inline]
-    pub fn prefix(mut self, prefix: impl ToString) -> Self {
-        self.prefix = prefix.to_string();
+    pub fn prefix(mut self, prefix: impl IntoAtoms<'a>) -> Self {
+        self.atoms.extend_left(prefix.into_atoms());
         self
     }
 
     /// Add a suffix to the number, this can be e.g. a unit ("°" or " m")
     #[inline]
-    pub fn suffix(mut self, suffix: impl ToString) -> Self {
-        self.suffix = suffix.to_string();
+    pub fn suffix(mut self, suffix: impl IntoAtoms<'a>) -> Self {
+        self.atoms.extend_right(suffix.into_atoms());
         self
     }
 
@@ -424,23 +427,46 @@ impl<'a> DragValue<'a> {
         self.update_while_editing = update;
         self
     }
+
+    /// Output the [`DragValue`]'s [`Atoms`].
+    ///
+    /// This includes any images you have on the [`DragValue`].
+    pub fn atoms(&self) -> &Atoms<'a> {
+        &self.atoms
+    }
 }
 
-impl<'a> Widget for DragValue<'a> {
+impl Widget for DragValue<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let Self {
             mut get_set_value,
             speed,
             range,
             clamp_existing_to_range,
-            prefix,
-            suffix,
+            mut atoms,
             min_decimals,
             max_decimals,
             custom_formatter,
             custom_parser,
             update_while_editing,
         } = self;
+
+        let mut prefix_text = String::new();
+        let mut suffix_text = String::new();
+        let mut past_value = false;
+        let atom_id = Id::new(Self::ATOM_ID);
+        for atom in atoms.iter() {
+            if atom.id == Some(atom_id) {
+                past_value = true;
+            }
+            if let AtomKind::Text(text) = &atom.kind {
+                if past_value {
+                    suffix_text.push_str(text.text());
+                } else {
+                    prefix_text.push_str(text.text());
+                }
+            }
+        }
 
         let shift = ui.input(|i| i.modifiers.shift_only());
         // The widget has the same ID whether it's in edit or button mode.
@@ -451,13 +477,14 @@ impl<'a> Widget for DragValue<'a> {
         // it is immediately rendered in edit mode, rather than being rendered
         // in button mode for just one frame. This is important for
         // screen readers.
-        let is_kb_editing = ui.memory_mut(|mem| {
-            mem.interested_in_focus(id);
-            mem.has_focus(id)
-        });
+        let is_kb_editing = ui.is_enabled()
+            && ui.memory_mut(|mem| {
+                mem.interested_in_focus(id, ui.layer_id());
+                mem.has_focus(id)
+            });
 
         if ui.memory_mut(|mem| mem.gained_focus(id)) {
-            ui.data_mut(|data| data.remove::<String>(id));
+            ui.data_mut(|data| data.remove::<EditState>(id));
         }
 
         let old_value = get(&mut get_set_value);
@@ -488,27 +515,21 @@ impl<'a> Widget for DragValue<'a> {
                     - input.count_and_consume_key(Modifiers::NONE, Key::ArrowDown) as f64;
             }
 
-            #[cfg(feature = "accesskit")]
-            {
-                use accesskit::Action;
-                change += input.num_accesskit_action_requests(id, Action::Increment) as f64
-                    - input.num_accesskit_action_requests(id, Action::Decrement) as f64;
-            }
+            use accesskit::Action;
+            change += input.num_accesskit_action_requests(id, Action::Increment) as f64
+                - input.num_accesskit_action_requests(id, Action::Decrement) as f64;
 
             change
         });
 
-        #[cfg(feature = "accesskit")]
-        {
+        ui.input(|input| {
             use accesskit::{Action, ActionData};
-            ui.input(|input| {
-                for request in input.accesskit_action_requests(id, Action::SetValue) {
-                    if let Some(ActionData::NumericValue(new_value)) = request.data {
-                        value = new_value;
-                    }
+            for request in input.accesskit_action_requests(id, Action::SetValue) {
+                if let Some(ActionData::NumericValue(new_value)) = request.data {
+                    value = new_value;
                 }
-            });
-        }
+            }
+        });
 
         if clamp_existing_to_range {
             value = clamp_value_to_range(value, range.clone());
@@ -521,7 +542,7 @@ impl<'a> Widget for DragValue<'a> {
 
         if old_value != value {
             set(&mut get_set_value, value);
-            ui.data_mut(|data| data.remove::<String>(id));
+            ui.data_mut(|data| data.remove::<EditState>(id));
         }
 
         let value_text = match custom_formatter {
@@ -535,11 +556,16 @@ impl<'a> Widget for DragValue<'a> {
         let text_style = ui.style().drag_value_text_style.clone();
 
         if ui.memory(|mem| mem.lost_focus(id)) && !ui.input(|i| i.key_pressed(Key::Escape)) {
-            let value_text = ui.data_mut(|data| data.remove_temp::<String>(id));
-            if let Some(value_text) = value_text {
+            let edit_state = ui.data_mut(|data| data.remove_temp::<EditState>(id));
+            // Ignore the text if the value was changed by something else while we were editing it,
+            // or we would revert that change.
+            if let Some(value_text) = edit_state
+                .filter(|edit_state| edit_state.value == old_value)
+                .map(|edit_state| edit_state.text)
+            {
                 // We were editing the value as text last frame, but lost focus.
                 // Make sure we applied the last text value:
-                let parsed_value = parse(&custom_parser, &value_text);
+                let parsed_value = parse(custom_parser.as_ref(), &value_text);
                 if let Some(mut parsed_value) = parsed_value {
                     // User edits always clamps:
                     parsed_value = clamp_value_to_range(parsed_value, range.clone());
@@ -548,12 +574,13 @@ impl<'a> Widget for DragValue<'a> {
             }
         }
 
-        // some clones below are redundant if AccessKit is disabled
-        #[allow(clippy::redundant_clone)]
         let mut response = if is_kb_editing {
+            // Keep editing the text from last frame, unless the value was changed by
+            // something else in the meantime, in which case the text is stale.
             let mut value_text = ui
-                .data_mut(|data| data.remove_temp::<String>(id))
-                .unwrap_or_else(|| value_text.clone());
+                .data_mut(|data| data.remove_temp::<EditState>(id))
+                .filter(|edit_state| edit_state.value == old_value)
+                .map_or_else(|| value_text.clone(), |edit_state| edit_state.text);
             let response = ui.add(
                 TextEdit::singleline(&mut value_text)
                     .clip_text(false)
@@ -562,9 +589,16 @@ impl<'a> Widget for DragValue<'a> {
                     .margin(ui.spacing().button_padding)
                     .min_size(ui.spacing().interact_size)
                     .id(id)
-                    .desired_width(ui.spacing().interact_size.x)
+                    .desired_width(
+                        ui.spacing().interact_size.x - 2.0 * ui.spacing().button_padding.x,
+                    )
                     .font(text_style),
             );
+
+            // Select all text when the edit gains focus.
+            if ui.memory_mut(|mem| mem.gained_focus(id)) {
+                select_all_text(ui, id, response.id, &value_text);
+            }
 
             let update = if update_while_editing {
                 // Update when the edit content has changed.
@@ -574,23 +608,36 @@ impl<'a> Widget for DragValue<'a> {
                 response.lost_focus() && !ui.input(|i| i.key_pressed(Key::Escape))
             };
             if update {
-                let parsed_value = parse(&custom_parser, &value_text);
+                let parsed_value = parse(custom_parser.as_ref(), &value_text);
                 if let Some(mut parsed_value) = parsed_value {
                     // User edits always clamps:
                     parsed_value = clamp_value_to_range(parsed_value, range.clone());
                     set(&mut get_set_value, parsed_value);
                 }
             }
-            ui.data_mut(|data| data.insert_temp(id, value_text));
+            // Remember the value the text belongs to, so that next frame we can tell
+            // whether the value was changed by us or by something else.
+            let edit_state = EditState {
+                text: value_text,
+                value: get(&mut get_set_value),
+            };
+            ui.data_mut(|data| data.insert_temp(id, edit_state));
             response
         } else {
-            let button = Button::new(
-                RichText::new(format!("{}{}{}", prefix, value_text.clone(), suffix))
-                    .text_style(text_style),
-            )
-            .wrap_mode(TextWrapMode::Extend)
-            .sense(Sense::click_and_drag())
-            .min_size(ui.spacing().interact_size); // TODO(emilk): find some more generic solution to `min_size`
+            atoms.map_atoms(|atom| {
+                if atom.id == Some(atom_id) {
+                    RichText::new(value_text.clone())
+                        .text_style(text_style.clone())
+                        .into()
+                } else {
+                    atom
+                }
+            });
+            let button = Button::new(atoms)
+                .wrap_mode(TextWrapMode::Extend)
+                .sense(Sense::click_and_drag())
+                .gap(0.0)
+                .min_size(ui.spacing().interact_size); // TODO(emilk): find some more generic solution to `min_size`
 
             let cursor_icon = if value <= *range.start() {
                 CursorIcon::ResizeEast
@@ -605,10 +652,8 @@ impl<'a> Widget for DragValue<'a> {
 
             if ui.style().explanation_tooltips {
                 response = response.on_hover_text(format!(
-                    "{}{}{}\nDrag to edit or click to enter a value.\nPress 'Shift' while dragging for better control.",
-                    prefix,
+                    "{}\nDrag to edit or click to enter a value.\nPress 'Shift' while dragging for better control.",
                     value as f32, // Show full precision value on-hover. TODO(emilk): figure out f64 vs f32
-                    suffix
                 ));
             }
 
@@ -618,16 +663,11 @@ impl<'a> Widget for DragValue<'a> {
             }
 
             if response.clicked() {
-                ui.data_mut(|data| data.remove::<String>(id));
+                ui.data_mut(|data| data.remove::<EditState>(id));
                 ui.memory_mut(|mem| mem.request_focus(id));
-                let mut state = TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
-                state.cursor.set_char_range(Some(text::CCursorRange::two(
-                    text::CCursor::default(),
-                    text::CCursor::new(value_text.chars().count()),
-                )));
-                state.store(ui.ctx(), response.id);
+                select_all_text(ui, id, response.id, &value_text);
             } else if response.dragged() {
-                ui.ctx().set_cursor_icon(cursor_icon);
+                ui.set_cursor_icon(cursor_icon);
 
                 let mdelta = response.drag_delta();
                 let delta_points = mdelta.x - mdelta.y; // Increase to the right and up
@@ -660,11 +700,12 @@ impl<'a> Widget for DragValue<'a> {
             response
         };
 
-        response.changed = get(&mut get_set_value) != old_value;
+        if get(&mut get_set_value) != old_value {
+            response.mark_changed();
+        }
 
         response.widget_info(|| WidgetInfo::drag_value(ui.is_enabled(), value));
 
-        #[cfg(feature = "accesskit")]
         ui.ctx().accesskit_node_builder(response.id, |builder| {
             use accesskit::Action;
             // If either end of the range is unbounded, it's better
@@ -686,7 +727,7 @@ impl<'a> Widget for DragValue<'a> {
             }
             // The name field is set to the current value by the button,
             // but we don't want it set that way on this widget type.
-            builder.clear_name();
+            builder.clear_label();
             // Always expose the value as a string. This makes the widget
             // more stable to accessibility users as it switches
             // between edit and button modes. This is particularly important
@@ -706,7 +747,7 @@ impl<'a> Widget for DragValue<'a> {
             // The value is exposed as a string by the text edit widget
             // when in edit mode.
             if !is_kb_editing {
-                let value_text = format!("{prefix}{value_text}{suffix}");
+                let value_text = format!("{prefix_text}{value_text}{suffix_text}");
                 builder.set_value(value_text);
             }
         });
@@ -715,8 +756,8 @@ impl<'a> Widget for DragValue<'a> {
     }
 }
 
-fn parse(custom_parser: &Option<NumParser<'_>>, value_text: &str) -> Option<f64> {
-    match &custom_parser {
+fn parse(custom_parser: Option<&NumParser<'_>>, value_text: &str) -> Option<f64> {
+    match custom_parser {
         Some(parser) => parser(value_text),
         None => default_parser(value_text),
     }
@@ -754,6 +795,16 @@ pub(crate) fn clamp_value_to_range(x: f64, range: RangeInclusive<f64>) -> f64 {
     }
 }
 
+/// Select all text in the `DragValue` text edit widget.
+fn select_all_text(ui: &Ui, widget_id: Id, response_id: Id, value_text: &str) {
+    let mut state = TextEdit::load_state(ui.ctx(), widget_id).unwrap_or_default();
+    state.cursor.set_char_range(Some(text::CCursorRange::two(
+        text::CCursor::default(),
+        text::CCursor::new(value_text.chars().count()),
+    )));
+    state.store(ui.ctx(), response_id);
+}
+
 #[cfg(test)]
 mod tests {
     use super::clamp_value_to_range;
@@ -761,7 +812,7 @@ mod tests {
     macro_rules! total_assert_eq {
         ($a:expr, $b:expr) => {
             assert!(
-                matches!($a.total_cmp(&$b), std::cmp::Ordering::Equal),
+                matches!($a.total_cmp(&$b), core::cmp::Ordering::Equal),
                 "{} != {}",
                 $a,
                 $b

@@ -28,11 +28,14 @@ impl crate::Demo for FontBook {
         "🔤 Font Book"
     }
 
-    fn show(&mut self, ctx: &egui::Context, open: &mut bool) {
-        egui::Window::new(self.name()).open(open).show(ctx, |ui| {
-            use crate::View as _;
-            self.ui(ui);
-        });
+    fn show(&mut self, ui: &mut egui::Ui, open: &mut bool) {
+        egui::Window::new(self.name())
+            .open(open)
+            .constrain_to(ui.available_rect_before_wrap())
+            .show(ui, |ui| {
+                use crate::View as _;
+                self.ui(ui);
+            });
     }
 }
 
@@ -77,7 +80,7 @@ impl crate::View for FontBook {
         let available_glyphs = self
             .available_glyphs
             .entry(self.font_id.family.clone())
-            .or_insert_with(|| available_characters(ui, self.font_id.family.clone()));
+            .or_insert_with(|| available_characters(ui, &self.font_id.family));
 
         ui.separator();
 
@@ -85,7 +88,7 @@ impl crate::View for FontBook {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = egui::Vec2::splat(2.0);
 
-                for (&chr, glyph_info) in available_glyphs {
+                for (&chr, glyph_info) in available_glyphs.iter() {
                     if filter.is_empty()
                         || glyph_info.name.contains(filter)
                         || *filter == chr.to_string()
@@ -96,17 +99,13 @@ impl crate::View for FontBook {
                         .frame(false);
 
                         let tooltip_ui = |ui: &mut egui::Ui| {
-                            ui.label(
-                                egui::RichText::new(chr.to_string()).font(self.font_id.clone()),
-                            );
-                            ui.label(format!(
-                                "{}\nU+{:X}\n\nFound in: {:?}\n\nClick to copy",
-                                glyph_info.name, chr as u32, glyph_info.fonts
-                            ));
+                            let font_id = self.font_id.clone();
+
+                            char_info_ui(ui, chr, glyph_info, font_id);
                         };
 
                         if ui.add(button).on_hover_ui(tooltip_ui).clicked() {
-                            ui.ctx().copy_text(chr.to_string());
+                            ui.copy_text(chr.to_string());
                         }
                     }
                 }
@@ -115,11 +114,39 @@ impl crate::View for FontBook {
     }
 }
 
-fn available_characters(ui: &egui::Ui, family: egui::FontFamily) -> BTreeMap<char, GlyphInfo> {
-    ui.fonts(|f| {
-        f.lock()
-            .fonts
-            .font(&egui::FontId::new(10.0, family)) // size is arbitrary for getting the characters
+fn char_info_ui(ui: &mut egui::Ui, chr: char, glyph_info: &GlyphInfo, font_id: egui::FontId) {
+    let resp = ui.label(egui::RichText::new(chr.to_string()).font(font_id));
+
+    egui::Grid::new("char_info")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("Name");
+            ui.label(glyph_info.name.clone());
+            ui.end_row();
+
+            ui.label("Hex");
+            ui.label(format!("{:X}", chr as u32));
+            ui.end_row();
+
+            ui.label("Width");
+            ui.label(format!("{:.1} pts", resp.rect.width()));
+            ui.end_row();
+
+            ui.label("Fonts");
+            ui.label(
+                format!("{:?}", glyph_info.fonts)
+                    .trim_start_matches('[')
+                    .trim_end_matches(']'),
+            );
+            ui.end_row();
+        });
+}
+
+fn available_characters(ui: &egui::Ui, family: &egui::FontFamily) -> BTreeMap<char, GlyphInfo> {
+    ui.fonts_mut(|f| {
+        f.fonts
+            .font(family)
             .characters()
             .iter()
             .filter(|(chr, _fonts)| !chr.is_whitespace() && !chr.is_ascii_control())
@@ -144,7 +171,7 @@ fn char_name(chr: char) -> String {
 }
 
 fn special_char_name(chr: char) -> Option<&'static str> {
-    #[allow(clippy::match_same_arms)] // many "flag"
+    #[expect(clippy::match_same_arms)] // many "flag"
     match chr {
         // Special private-use-area extensions found in `emoji-icon-font.ttf`:
         // Private use area extensions:
@@ -175,7 +202,6 @@ fn special_char_name(chr: char) -> Option<&'static str> {
         '\u{E600}' => Some("web-dribbble"),
         '\u{E601}' => Some("web-stackoverflow"),
         '\u{E602}' => Some("web-vimeo"),
-        '\u{E603}' => Some("web-twitter"),
         '\u{E604}' => Some("web-facebook"),
         '\u{E605}' => Some("web-googleplus"),
         '\u{E606}' => Some("web-pinterest"),

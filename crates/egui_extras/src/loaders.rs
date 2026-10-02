@@ -63,9 +63,9 @@ pub fn install_image_loaders(ctx: &egui::Context) {
     }
 
     #[cfg(feature = "http")]
-    if !ctx.is_loader_installed(self::ehttp_loader::EhttpLoader::ID) {
+    if !ctx.is_loader_installed(self::http_loader::EhttpLoader::ID) {
         ctx.add_bytes_loader(std::sync::Arc::new(
-            self::ehttp_loader::EhttpLoader::default(),
+            self::http_loader::EhttpLoader::default(),
         ));
         log::trace!("installed EhttpLoader");
     }
@@ -82,6 +82,12 @@ pub fn install_image_loaders(ctx: &egui::Context) {
     if !ctx.is_loader_installed(self::gif_loader::GifLoader::ID) {
         ctx.add_image_loader(std::sync::Arc::new(self::gif_loader::GifLoader::default()));
         log::trace!("installed GifLoader");
+    }
+
+    #[cfg(feature = "webp")]
+    if !ctx.is_loader_installed(self::webp_loader::WebPLoader::ID) {
+        ctx.add_image_loader(std::sync::Arc::new(self::webp_loader::WebPLoader::default()));
+        log::trace!("installed WebPLoader");
     }
 
     #[cfg(feature = "svg")]
@@ -102,14 +108,16 @@ pub fn install_image_loaders(ctx: &egui::Context) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-mod file_loader;
+pub mod file_loader;
 
 #[cfg(feature = "http")]
-mod ehttp_loader;
+pub mod http_loader;
 
 #[cfg(feature = "gif")]
-mod gif_loader;
+pub mod gif_loader;
 #[cfg(feature = "image")]
-mod image_loader;
+pub mod image_loader;
 #[cfg(feature = "svg")]
-mod svg_loader;
+pub mod svg_loader;
+#[cfg(feature = "webp")]
+pub mod webp_loader;

@@ -3,10 +3,8 @@
 //! Turn on the `syntect` feature for great syntax highlighting of any language.
 //! Otherwise, a very simple fallback will be used, that works okish for C, C++, Rust, and Python.
 
-#![allow(clippy::mem_forget)] // False positive from enum_map macro
-
-use egui::text::LayoutJob;
 use egui::TextStyle;
+use egui::text::LayoutJob;
 
 /// View some code with syntax highlighting and selection.
 pub fn code_view_ui(
@@ -29,32 +27,96 @@ pub fn highlight(
     code: &str,
     language: &str,
 ) -> LayoutJob {
+    highlight_inner(ctx, style, theme, code, language, None)
+}
+
+/// Add syntax highlighting to a code string, with custom `syntect` settings
+///
+/// The results are memoized, so you can call this every frame without performance penalty.
+///
+/// The `syntect` settings are memoized by *address*, so a stable reference should
+/// be used to avoid unnecessary recomputation.
+#[cfg(feature = "syntect")]
+pub fn highlight_with(
+    ctx: &egui::Context,
+    style: &egui::Style,
+    theme: &CodeTheme,
+    code: &str,
+    language: &str,
+    settings: &SyntectSettings,
+) -> LayoutJob {
+    highlight_inner(
+        ctx,
+        style,
+        theme,
+        code,
+        language,
+        Some(HighlightSettings(settings)),
+    )
+}
+
+fn highlight_inner(
+    ctx: &egui::Context,
+    style: &egui::Style,
+    theme: &CodeTheme,
+    code: &str,
+    language: &str,
+    settings: Option<HighlightSettings<'_>>,
+) -> LayoutJob {
     // We take in both context and style so that in situations where ui is not available such as when
-    // performing it at a separate thread (ctx, ctx.style()) can be used and when ui is available
+    // performing it at a separate thread (ctx, ctx.global_style()) can be used and when ui is available
     // (ui.ctx(), ui.style()) can be used
 
-    impl egui::util::cache::ComputerMut<(&egui::FontId, &CodeTheme, &str, &str), LayoutJob>
-        for Highlighter
+    #[expect(non_local_definitions)]
+    impl
+        egui::cache::ComputerMut<
+            (&egui::FontId, &CodeTheme, &str, &str, HighlightSettings<'_>),
+            LayoutJob,
+        > for Highlighter
     {
         fn compute(
             &mut self,
-            (font_id, theme, code, lang): (&egui::FontId, &CodeTheme, &str, &str),
+            (font_id, theme, code, lang, settings): (
+                &egui::FontId,
+                &CodeTheme,
+                &str,
+                &str,
+                HighlightSettings<'_>,
+            ),
         ) -> LayoutJob {
-            self.highlight(font_id.clone(), theme, code, lang)
+            Self::highlight(font_id.clone(), theme, code, lang, settings)
         }
     }
 
-    type HighlightCache = egui::util::cache::FrameCache<LayoutJob, Highlighter>;
+    type HighlightCache = egui::cache::FrameCache<LayoutJob, Highlighter>;
 
     let font_id = style
         .override_font_id
         .clone()
         .unwrap_or_else(|| TextStyle::Monospace.resolve(style));
 
+    // Private type, so that users can't interfere with it in the `IdTypeMap`
+    #[cfg(feature = "syntect")]
+    #[derive(Clone, Default)]
+    struct PrivateSettings(std::sync::Arc<SyntectSettings>);
+
+    // Dummy private settings, to minimize code changes without `syntect`
+    #[cfg(not(feature = "syntect"))]
+    #[derive(Clone, Default)]
+    struct PrivateSettings(std::sync::Arc<()>);
+
     ctx.memory_mut(|mem| {
+        let settings = settings.unwrap_or_else(|| {
+            HighlightSettings(
+                &mem.data
+                    .get_temp_mut_or_default::<PrivateSettings>(egui::Id::NULL)
+                    .0,
+            )
+        });
         mem.caches
             .cache::<HighlightCache>()
-            .get((&font_id, theme, code, language))
+            .get((&font_id, theme, code, language, settings))
+            .clone()
     })
 }
 
@@ -167,6 +229,10 @@ impl Default for CodeTheme {
 }
 
 impl CodeTheme {
+    pub fn is_dark(&self) -> bool {
+        self.dark_mode
+    }
+
     /// Selects either dark or light theme based on the given style.
     pub fn from_style(style: &egui::Style) -> Self {
         let font_id = style
@@ -209,7 +275,7 @@ impl CodeTheme {
     ///
     /// There is one dark and one light theme stored at any one time.
     pub fn from_memory(ctx: &egui::Context, style: &egui::Style) -> Self {
-        #![allow(clippy::needless_return)]
+        #![expect(clippy::needless_return)]
 
         let (id, default) = if style.visuals.dark_mode {
             (egui::Id::new("dark"), Self::dark as fn(f32) -> Self)
@@ -238,7 +304,7 @@ impl CodeTheme {
     ///
     /// There is one dark and one light theme stored at any one time.
     pub fn store_in_memory(self, ctx: &egui::Context) {
-        let id = if ctx.style().visuals.dark_mode {
+        let id = if ctx.global_style().visuals.dark_mode {
             egui::Id::new("dark")
         } else {
             egui::Id::new("light")
@@ -254,6 +320,24 @@ impl CodeTheme {
 
 #[cfg(feature = "syntect")]
 impl CodeTheme {
+    /// Change the font size
+    pub fn with_font_size(&self, font_size: f32) -> Self {
+        Self {
+            dark_mode: self.dark_mode,
+            syntect_theme: self.syntect_theme,
+            font_id: egui::FontId::monospace(font_size),
+        }
+    }
+
+    /// Change the `font_id` of the theme
+    pub fn with_font_id(&self, font_id: egui::FontId) -> Self {
+        Self {
+            dark_mode: self.dark_mode,
+            syntect_theme: self.syntect_theme,
+            font_id,
+        }
+    }
+
     fn dark_with_font_id(font_id: egui::FontId) -> Self {
         Self {
             dark_mode: true,
@@ -272,12 +356,16 @@ impl CodeTheme {
 
     /// Show UI for changing the color theme.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        egui::widgets::global_theme_preference_buttons(ui);
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.dark_mode, true, "🌙 Dark theme")
+                .on_hover_text("Use the dark mode theme");
 
-        for theme in SyntectTheme::all() {
-            if theme.is_dark() == self.dark_mode {
-                ui.radio_value(&mut self.syntect_theme, theme, theme.name());
-            }
+            ui.selectable_value(&mut self.dark_mode, false, "☀ Light theme")
+                .on_hover_text("Use the light mode theme");
+        });
+        let current_theme_is_dark = self.is_dark();
+        for theme in SyntectTheme::all().filter(|t| t.is_dark() == current_theme_is_dark) {
+            ui.radio_value(&mut self.syntect_theme, theme, theme.name());
         }
     }
 }
@@ -286,8 +374,9 @@ impl CodeTheme {
 impl CodeTheme {
     // The syntect version takes it by value. This could be avoided by specializing the from_style
     // function, but at the cost of more code duplication.
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     fn dark_with_font_id(font_id: egui::FontId) -> Self {
+        #![expect(clippy::mem_forget)]
         use egui::{Color32, TextFormat};
         Self {
             dark_mode: true,
@@ -303,8 +392,9 @@ impl CodeTheme {
     }
 
     // The syntect version takes it by value
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     fn light_with_font_id(font_id: egui::FontId) -> Self {
+        #![expect(clippy::mem_forget)]
         use egui::{Color32, TextFormat};
         Self {
             dark_mode: false,
@@ -335,12 +425,13 @@ impl CodeTheme {
 
             ui.vertical(|ui| {
                 ui.set_width(150.0);
-                egui::widgets::global_theme_preference_buttons(ui);
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.dark_mode, true, "🌙 Dark theme")
+                        .on_hover_text("Use the dark mode theme");
 
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
-
+                    ui.selectable_value(&mut self.dark_mode, false, "☀ Light theme")
+                        .on_hover_text("Use the light mode theme");
+                });
                 ui.scope(|ui| {
                     for (tt, tt_name) in [
                         (TokenType::Comment, "// comment"),
@@ -397,15 +488,16 @@ impl CodeTheme {
 // ----------------------------------------------------------------------------
 
 #[cfg(feature = "syntect")]
-struct Highlighter {
-    ps: syntect::parsing::SyntaxSet,
-    ts: syntect::highlighting::ThemeSet,
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SyntectSettings {
+    pub ps: syntect::parsing::SyntaxSet,
+    pub ts: syntect::highlighting::ThemeSet,
 }
 
 #[cfg(feature = "syntect")]
-impl Default for Highlighter {
+impl Default for SyntectSettings {
     fn default() -> Self {
-        crate::profile_function!();
+        profiling::function_scope!();
         Self {
             ps: syntect::parsing::SyntaxSet::load_defaults_newlines(),
             ts: syntect::highlighting::ThemeSet::load_defaults(),
@@ -413,16 +505,33 @@ impl Default for Highlighter {
     }
 }
 
+/// Highlight settings are memoized by reference address, rather than value
+#[cfg(feature = "syntect")]
+#[derive(Copy, Clone)]
+struct HighlightSettings<'a>(&'a SyntectSettings);
+
+#[cfg(not(feature = "syntect"))]
+#[derive(Copy, Clone)]
+struct HighlightSettings<'a>(&'a ());
+
+impl core::hash::Hash for HighlightSettings<'_> {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        core::ptr::hash(self.0, state);
+    }
+}
+
+#[derive(Default)]
+struct Highlighter;
+
 impl Highlighter {
-    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
     fn highlight(
-        &self,
         font_id: egui::FontId,
         theme: &CodeTheme,
         code: &str,
         lang: &str,
+        settings: HighlightSettings<'_>,
     ) -> LayoutJob {
-        self.highlight_impl(theme, code, lang).unwrap_or_else(|| {
+        Self::highlight_impl(theme, code, lang, settings).unwrap_or_else(|| {
             // Fallback:
             LayoutJob::simple(
                 code.into(),
@@ -438,20 +547,25 @@ impl Highlighter {
     }
 
     #[cfg(feature = "syntect")]
-    fn highlight_impl(&self, theme: &CodeTheme, text: &str, language: &str) -> Option<LayoutJob> {
-        crate::profile_function!();
-
+    fn highlight_impl(
+        theme: &CodeTheme,
+        text: &str,
+        language: &str,
+        highlighter: HighlightSettings<'_>,
+    ) -> Option<LayoutJob> {
+        profiling::function_scope!();
         use syntect::easy::HighlightLines;
         use syntect::highlighting::FontStyle;
         use syntect::util::LinesWithEndings;
 
-        let syntax = self
+        let syntax = highlighter
+            .0
             .ps
             .find_syntax_by_name(language)
-            .or_else(|| self.ps.find_syntax_by_extension(language))?;
+            .or_else(|| highlighter.0.ps.find_syntax_by_extension(language))?;
 
         let syn_theme = theme.syntect_theme.syntect_key_name();
-        let mut h = HighlightLines::new(syntax, &self.ts.themes[syn_theme]);
+        let mut h = HighlightLines::new(syntax, &highlighter.0.ts.themes[syn_theme]);
 
         use egui::text::{LayoutSection, TextFormat};
 
@@ -461,7 +575,7 @@ impl Highlighter {
         };
 
         for line in LinesWithEndings::from(text) {
-            for (style, range) in h.highlight_line(line, &self.ps).ok()? {
+            for (style, range) in h.highlight_line(line, &highlighter.0.ps).ok()? {
                 let fg = style.foreground;
                 let text_color = egui::Color32::from_rgb(fg.r, fg.g, fg.b);
                 let italics = style.font_style.contains(FontStyle::ITALIC);
@@ -490,31 +604,34 @@ impl Highlighter {
 }
 
 #[cfg(feature = "syntect")]
-fn as_byte_range(whole: &str, range: &str) -> std::ops::Range<usize> {
+fn as_byte_range(whole: &str, range: &str) -> egui::text::ByteRange {
+    use egui::text::ByteIndex;
     let whole_start = whole.as_ptr() as usize;
     let range_start = range.as_ptr() as usize;
-    assert!(whole_start <= range_start);
-    assert!(range_start + range.len() <= whole_start + whole.len());
+    assert!(
+        whole_start <= range_start,
+        "range must be within whole, but was {range}"
+    );
+    assert!(
+        range_start + range.len() <= whole_start + whole.len(),
+        "range_start + range length must be smaller than whole_start + whole length, but was {}",
+        range_start + range.len()
+    );
     let offset = range_start - whole_start;
-    offset..(offset + range.len())
+    ByteIndex(offset)..ByteIndex(offset + range.len())
 }
 
 // ----------------------------------------------------------------------------
 
 #[cfg(not(feature = "syntect"))]
-#[derive(Default)]
-struct Highlighter {}
-
-#[cfg(not(feature = "syntect"))]
 impl Highlighter {
-    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
     fn highlight_impl(
-        &self,
         theme: &CodeTheme,
         mut text: &str,
         language: &str,
+        _settings: HighlightSettings<'_>,
     ) -> Option<LayoutJob> {
-        crate::profile_function!();
+        profiling::function_scope!();
 
         let language = Language::new(language)?;
 

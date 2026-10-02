@@ -6,10 +6,9 @@
 #![cfg_attr(feature = "document-features", doc = document_features::document_features!())]
 //!
 
-#![allow(clippy::float_cmp)]
-#![allow(clippy::manual_range_contains)]
+#![expect(clippy::manual_range_contains)]
 
-#[cfg(feature = "chrono")]
+#[cfg(feature = "datepicker")]
 mod datepicker;
 
 pub mod syntax_highlighting;
@@ -17,53 +16,20 @@ pub mod syntax_highlighting;
 #[doc(hidden)]
 pub mod image;
 mod layout;
-mod loaders;
+pub mod loaders;
 mod sizing;
 mod strip;
 mod table;
 
-#[cfg(feature = "chrono")]
+#[cfg(feature = "datepicker")]
 pub use crate::datepicker::DatePickerButton;
 
-#[doc(hidden)]
-#[allow(deprecated)]
-pub use crate::image::RetainedImage;
 pub(crate) use crate::layout::StripLayout;
 pub use crate::sizing::Size;
 pub use crate::strip::*;
 pub use crate::table::*;
 
 pub use loaders::install_image_loaders;
-
-// ---------------------------------------------------------------------------
-
-mod profiling_scopes {
-    #![allow(unused_macros)]
-    #![allow(unused_imports)]
-
-    /// Profiling macro for feature "puffin"
-    macro_rules! profile_function {
-        ($($arg: tt)*) => {
-            #[cfg(feature = "puffin")]
-            #[cfg(not(target_arch = "wasm32"))] // Disabled on web because of the coarse 1ms clock resolution there.
-            puffin::profile_function!($($arg)*);
-        };
-    }
-    pub(crate) use profile_function;
-
-    /// Profiling macro for feature "puffin"
-    macro_rules! profile_scope {
-        ($($arg: tt)*) => {
-            #[cfg(feature = "puffin")]
-            #[cfg(not(target_arch = "wasm32"))] // Disabled on web because of the coarse 1ms clock resolution there.
-            puffin::profile_scope!($($arg)*);
-        };
-    }
-    pub(crate) use profile_scope;
-}
-
-#[allow(unused_imports)]
-pub(crate) use profiling_scopes::profile_function;
 
 // ---------------------------------------------------------------------------
 

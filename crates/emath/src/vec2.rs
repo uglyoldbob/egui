@@ -1,5 +1,5 @@
+use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use std::fmt;
-use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 use crate::Vec2b;
 
@@ -10,7 +10,7 @@ use crate::Vec2b;
 ///
 /// Normally the units are points (logical pixels).
 #[repr(C)]
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Copy, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[cfg_attr(feature = "bytemuck", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct Vec2 {
@@ -140,6 +140,7 @@ impl Vec2 {
     pub const DOWN: Self = Self { x: 0.0, y: 1.0 };
 
     pub const ZERO: Self = Self { x: 0.0, y: 0.0 };
+    pub const ONE: Self = Self { x: 1.0, y: 1.0 };
     pub const INFINITY: Self = Self::splat(f32::INFINITY);
     pub const NAN: Self = Self::splat(f32::NAN);
 
@@ -169,11 +170,13 @@ impl Vec2 {
     #[inline(always)]
     pub fn normalized(self) -> Self {
         let len = self.length();
-        if len <= 0.0 {
-            self
-        } else {
-            self / len
-        }
+        if len <= 0.0 { self } else { self / len }
+    }
+
+    /// Checks if `self` has length `1.0` up to a precision of `1e-6`.
+    #[inline(always)]
+    pub fn is_normalized(self) -> bool {
+        (self.length_sq() - 1.0).abs() < 2e-6
     }
 
     /// Rotates the vector by 90°, i.e positive X to positive Y
@@ -319,7 +322,7 @@ impl Vec2 {
     }
 }
 
-impl std::ops::Index<usize> for Vec2 {
+impl core::ops::Index<usize> for Vec2 {
     type Output = f32;
 
     #[inline(always)]
@@ -332,7 +335,7 @@ impl std::ops::Index<usize> for Vec2 {
     }
 }
 
-impl std::ops::IndexMut<usize> for Vec2 {
+impl core::ops::IndexMut<usize> for Vec2 {
     #[inline(always)]
     fn index_mut(&mut self, index: usize) -> &mut f32 {
         match index {
@@ -343,6 +346,21 @@ impl std::ops::IndexMut<usize> for Vec2 {
     }
 }
 
+impl PartialEq for Vec2 {
+    #[track_caller]
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        debug_assert!(
+            !self.any_nan() && !other.any_nan(),
+            "Comparing NaN vectors ({self:?} and {other:?}). \
+             A NaN is not even equal to itself, which leads to very confusing bugs."
+        );
+        self.x == other.x && self.y == other.y
+    }
+}
+
+/// This is a lie for NaN vectors, which are not equal to themselves.
+/// [`PartialEq`] catches those in debug builds.
 impl Eq for Vec2 {}
 
 impl Neg for Vec2 {
@@ -497,8 +515,10 @@ impl fmt::Display for Vec2 {
     }
 }
 
-#[test]
-fn test_vec2() {
+#[cfg(test)]
+mod test {
+    use super::*;
+
     macro_rules! almost_eq {
         ($left: expr, $right: expr) => {
             let left = $left;
@@ -506,32 +526,58 @@ fn test_vec2() {
             assert!((left - right).abs() < 1e-6, "{} != {}", left, right);
         };
     }
-    use std::f32::consts::TAU;
 
-    assert_eq!(Vec2::ZERO.angle(), 0.0);
-    assert_eq!(Vec2::angled(0.0).angle(), 0.0);
-    assert_eq!(Vec2::angled(1.0).angle(), 1.0);
-    assert_eq!(Vec2::X.angle(), 0.0);
-    assert_eq!(Vec2::Y.angle(), 0.25 * TAU);
+    #[test]
+    fn test_vec2() {
+        use core::f32::consts::TAU;
 
-    assert_eq!(Vec2::RIGHT.angle(), 0.0);
-    assert_eq!(Vec2::DOWN.angle(), 0.25 * TAU);
-    almost_eq!(Vec2::LEFT.angle(), 0.50 * TAU);
-    assert_eq!(Vec2::UP.angle(), -0.25 * TAU);
+        assert_eq!(Vec2::ZERO.angle(), 0.0);
+        assert_eq!(Vec2::angled(0.0).angle(), 0.0);
+        assert_eq!(Vec2::angled(1.0).angle(), 1.0);
+        assert_eq!(Vec2::X.angle(), 0.0);
+        assert_eq!(Vec2::Y.angle(), 0.25 * TAU);
 
-    let mut assignment = vec2(1.0, 2.0);
-    assignment += vec2(3.0, 4.0);
-    assert_eq!(assignment, vec2(4.0, 6.0));
+        assert_eq!(Vec2::RIGHT.angle(), 0.0);
+        assert_eq!(Vec2::DOWN.angle(), 0.25 * TAU);
+        almost_eq!(Vec2::LEFT.angle(), 0.50 * TAU);
+        assert_eq!(Vec2::UP.angle(), -0.25 * TAU);
 
-    let mut assignment = vec2(4.0, 6.0);
-    assignment -= vec2(1.0, 2.0);
-    assert_eq!(assignment, vec2(3.0, 4.0));
+        let mut assignment = vec2(1.0, 2.0);
+        assignment += vec2(3.0, 4.0);
+        assert_eq!(assignment, vec2(4.0, 6.0));
 
-    let mut assignment = vec2(1.0, 2.0);
-    assignment *= 2.0;
-    assert_eq!(assignment, vec2(2.0, 4.0));
+        let mut assignment = vec2(4.0, 6.0);
+        assignment -= vec2(1.0, 2.0);
+        assert_eq!(assignment, vec2(3.0, 4.0));
 
-    let mut assignment = vec2(2.0, 4.0);
-    assignment /= 2.0;
-    assert_eq!(assignment, vec2(1.0, 2.0));
+        let mut assignment = vec2(1.0, 2.0);
+        assignment *= 2.0;
+        assert_eq!(assignment, vec2(2.0, 4.0));
+
+        let mut assignment = vec2(2.0, 4.0);
+        assignment /= 2.0;
+        assert_eq!(assignment, vec2(1.0, 2.0));
+    }
+
+    #[test]
+    fn test_vec2_normalized() {
+        fn generate_spiral(n: usize, start: Vec2, end: Vec2) -> impl Iterator<Item = Vec2> {
+            let angle_step = 2.0 * core::f32::consts::PI / n as f32;
+            let radius_step = (end.length() - start.length()) / n as f32;
+
+            (0..n).map(move |i| {
+                let angle = i as f32 * angle_step;
+                let radius = start.length() + i as f32 * radius_step;
+                let x = radius * angle.cos();
+                let y = radius * angle.sin();
+                vec2(x, y)
+            })
+        }
+
+        for v in generate_spiral(40, Vec2::splat(0.1), Vec2::splat(2.0)) {
+            let vn = v.normalized();
+            almost_eq!(vn.length(), 1.0);
+            assert!(vn.is_normalized());
+        }
+    }
 }

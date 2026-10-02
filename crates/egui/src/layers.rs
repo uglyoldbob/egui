@@ -1,8 +1,8 @@
 //! Handles paint layers, i.e. how things
 //! are sometimes painted behind or in front of other things.
 
-use crate::{ahash, epaint, Id, IdMap, Rect};
-use epaint::{emath::TSTransform, ClippedShape, Shape};
+use crate::{Id, IdMap, Rect, epaint};
+use epaint::{ClippedShape, Shape, emath::TSTransform};
 
 /// Different layer categories
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
@@ -10,9 +10,6 @@ use epaint::{emath::TSTransform, ClippedShape, Shape};
 pub enum Order {
     /// Painted behind all floating windows
     Background,
-
-    /// Special layer between panels and windows
-    PanelResizeLine,
 
     /// Normal moveable windows that you reorder by click
     Middle,
@@ -30,10 +27,9 @@ pub enum Order {
 }
 
 impl Order {
-    const COUNT: usize = 6;
+    const COUNT: usize = 5;
     const ALL: [Self; Self::COUNT] = [
         Self::Background,
-        Self::PanelResizeLine,
         Self::Middle,
         Self::Foreground,
         Self::Tooltip,
@@ -44,12 +40,9 @@ impl Order {
     #[inline(always)]
     pub fn allow_interaction(&self) -> bool {
         match self {
-            Self::Background
-            | Self::PanelResizeLine
-            | Self::Middle
-            | Self::Foreground
-            | Self::Tooltip
-            | Self::Debug => true,
+            Self::Background | Self::Middle | Self::Foreground | Self::Tooltip | Self::Debug => {
+                true
+            }
         }
     }
 
@@ -57,7 +50,6 @@ impl Order {
     pub fn short_debug_format(&self) -> &'static str {
         match self {
             Self::Background => "backg",
-            Self::PanelResizeLine => "panel",
             Self::Middle => "middl",
             Self::Foreground => "foreg",
             Self::Tooltip => "toolt",
@@ -68,7 +60,7 @@ impl Order {
 
 /// An identifier for a paint layer.
 /// Also acts as an identifier for [`crate::Area`]:s.
-#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
+#[derive(Clone, Copy, Hash, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct LayerId {
     pub order: Order,
@@ -94,11 +86,6 @@ impl LayerId {
         }
     }
 
-    #[inline(always)]
-    pub fn allow_interaction(&self) -> bool {
-        self.order.allow_interaction()
-    }
-
     /// Short and readable summary
     pub fn short_debug_format(&self) -> String {
         format!(
@@ -106,6 +93,13 @@ impl LayerId {
             self.order.short_debug_format(),
             self.id.short_debug_format()
         )
+    }
+}
+
+impl core::fmt::Debug for LayerId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let Self { order, id } = self;
+        write!(f, "LayerId {{ {order:?} {id:?} }}")
     }
 }
 
@@ -154,7 +148,6 @@ impl PaintList {
     #[inline(always)]
     pub fn set(&mut self, idx: ShapeIdx, clip_rect: Rect, shape: Shape) {
         if self.0.len() <= idx.0 {
-            #[cfg(feature = "log")]
             log::warn!("Index {} is out of bounds for PaintList", idx.0);
             return;
         }
@@ -220,9 +213,9 @@ impl GraphicLayers {
     pub fn drain(
         &mut self,
         area_order: &[LayerId],
-        transforms: &ahash::HashMap<LayerId, TSTransform>,
+        to_global: &ahash::HashMap<LayerId, TSTransform>,
     ) -> Vec<ClippedShape> {
-        crate::profile_function!();
+        profiling::function_scope!();
 
         let mut all_shapes: Vec<_> = Default::default();
 
@@ -236,27 +229,28 @@ impl GraphicLayers {
 
             // First do the layers part of area_order:
             for layer_id in area_order {
-                if layer_id.order == order {
-                    if let Some(list) = order_map.get_mut(&layer_id.id) {
-                        if let Some(transform) = transforms.get(layer_id) {
-                            for clipped_shape in &mut list.0 {
-                                clipped_shape.clip_rect = *transform * clipped_shape.clip_rect;
-                                clipped_shape.shape.transform(*transform);
-                            }
+                if layer_id.order == order
+                    && let Some(list) = order_map.get_mut(&layer_id.id)
+                {
+                    if let Some(to_global) = to_global.get(layer_id) {
+                        for clipped_shape in &mut list.0 {
+                            clipped_shape.transform(*to_global);
                         }
-                        all_shapes.append(&mut list.0);
                     }
+                    all_shapes.append(&mut list.0);
                 }
             }
 
             // Also draw areas that are missing in `area_order`:
+            // NOTE: We don't think we end up here in normal situations.
+            // This is just a safety net in case we have some bug somewhere.
+            #[expect(clippy::iter_over_hash_type)]
             for (id, list) in order_map {
                 let layer_id = LayerId::new(order, *id);
 
-                if let Some(transform) = transforms.get(&layer_id) {
+                if let Some(to_global) = to_global.get(&layer_id) {
                     for clipped_shape in &mut list.0 {
-                        clipped_shape.clip_rect = *transform * clipped_shape.clip_rect;
-                        clipped_shape.shape.transform(*transform);
+                        clipped_shape.transform(*to_global);
                     }
                 }
 

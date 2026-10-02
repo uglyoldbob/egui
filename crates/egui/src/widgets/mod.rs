@@ -4,7 +4,13 @@
 //! * `ui.add(Label::new("Text").text_color(color::red));`
 //! * `if ui.add(Button::new("Click me")).clicked() { … }`
 
-use crate::{epaint, Response, Ui};
+use crate::{Response, Ui};
+
+/// A dynamically dispatched [`Widget`].
+///
+/// [`Widget`] is not dyn compatible because [`Widget::ui`] takes `self` by value.
+/// This alias uses a closure, which implements [`Widget`].
+pub type BoxedWidget<'a> = Box<dyn FnOnce(&mut Ui) -> Response + 'a>;
 
 mod button;
 mod checkbox;
@@ -12,11 +18,9 @@ pub mod color_picker;
 pub(crate) mod drag_value;
 mod hyperlink;
 mod image;
-mod image_button;
 mod label;
 mod progress_bar;
 mod radio_button;
-mod selected_label;
 mod separator;
 mod slider;
 mod spinner;
@@ -28,14 +32,12 @@ pub use self::{
     drag_value::DragValue,
     hyperlink::{Hyperlink, Link},
     image::{
-        decode_gif_uri, has_gif_magic_header, paint_texture_at, GifFrameDurations, Image, ImageFit,
-        ImageOptions, ImageSize, ImageSource,
+        FrameDurations, Image, ImageFit, ImageOptions, ImageSize, ImageSource,
+        decode_animated_image_uri, has_gif_magic_header, has_webp_header, paint_texture_at,
     },
-    image_button::ImageButton,
     label::Label,
     progress_bar::ProgressBar,
     radio_button::RadioButton,
-    selected_label::SelectableLabel,
     separator::Separator,
     slider::{Slider, SliderClamping, SliderOrientation},
     spinner::Spinner,
@@ -67,6 +69,20 @@ pub trait Widget {
     ///
     /// Tip: you can `impl Widget for &mut YourObject { }`.
     fn ui(self, ui: &mut Ui) -> Response;
+
+    /// Box this widget for dynamic dispatch.
+    #[inline]
+    fn boxed<'a>(self) -> BoxedWidget<'a>
+    where
+        Self: Sized + 'a,
+    {
+        Box::new(move |ui: &mut Ui| ui.add(self))
+    }
+}
+
+#[test]
+fn widgets_can_be_boxed() {
+    let _: BoxedWidget<'static> = Button::new("boxed").boxed();
 }
 
 /// This enables functions that return `impl Widget`, so that you can
@@ -124,14 +140,6 @@ pub fn reset_button_with<T: PartialEq>(ui: &mut Ui, value: &mut T, text: &str, r
 
 // ----------------------------------------------------------------------------
 
-#[deprecated = "Use `ui.add(&mut stroke)` instead"]
-pub fn stroke_ui(ui: &mut crate::Ui, stroke: &mut epaint::Stroke, text: &str) {
-    ui.horizontal(|ui| {
-        ui.label(text);
-        ui.add(stroke);
-    });
-}
-
 /// Show a small button to switch to/from dark/light mode (globally).
 pub fn global_theme_preference_switch(ui: &mut Ui) {
     if let Some(new_theme) = ui.ctx().theme().small_toggle_button(ui) {
@@ -141,19 +149,7 @@ pub fn global_theme_preference_switch(ui: &mut Ui) {
 
 /// Show larger buttons for switching between light and dark mode (globally).
 pub fn global_theme_preference_buttons(ui: &mut Ui) {
-    let mut theme_preference = ui.ctx().options(|opt| opt.theme_preference);
+    let mut theme_preference = ui.options(|opt| opt.theme_preference);
     theme_preference.radio_buttons(ui);
     ui.ctx().set_theme(theme_preference);
-}
-
-/// Show a small button to switch to/from dark/light mode (globally).
-#[deprecated = "Use global_theme_preference_switch instead"]
-pub fn global_dark_light_mode_switch(ui: &mut Ui) {
-    global_theme_preference_switch(ui);
-}
-
-/// Show larger buttons for switching between light and dark mode (globally).
-#[deprecated = "Use global_theme_preference_buttons instead"]
-pub fn global_dark_light_mode_buttons(ui: &mut Ui) {
-    global_theme_preference_buttons(ui);
 }

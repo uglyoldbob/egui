@@ -1,8 +1,12 @@
 //! All the data egui returns to the backend at the end of each frame.
 
-use crate::{RepaintCause, ViewportIdMap, ViewportOutput, WidgetType};
+use core::ops::Range;
 
-/// What egui emits each frame from [`crate::Context::run`].
+use epaint::text::CharIndex;
+
+use crate::{OrderedViewportIdMap, RepaintCause, ViewportOutput, WidgetType};
+
+/// What egui emits each frame from [`crate::Context::run_ui`].
 ///
 /// The backend should use this.
 #[derive(Clone, Default)]
@@ -12,7 +16,7 @@ pub struct FullOutput {
 
     /// Texture changes since last frame (including the font texture).
     ///
-    /// The backend needs to apply [`crate::TexturesDelta::set`] _before_ painting,
+    /// The backend needs to apply [`crate::TexturesDelta::push`] _before_ painting,
     /// and free any texture in [`crate::TexturesDelta::free`] _after_ painting.
     ///
     /// It is assumed that all egui viewports share the same painter and texture namespace.
@@ -32,12 +36,14 @@ pub struct FullOutput {
     ///
     /// It is up to the integration to spawn a native window for each viewport,
     /// and to close any window that no longer has a viewport in this map.
-    pub viewport_output: ViewportIdMap<ViewportOutput>,
+    pub viewport_output: OrderedViewportIdMap<ViewportOutput>,
 }
 
 impl FullOutput {
     /// Add on new output.
     pub fn append(&mut self, newer: Self) {
+        use std::collections::btree_map::Entry;
+
         let Self {
             platform_output,
             textures_delta,
@@ -53,15 +59,37 @@ impl FullOutput {
 
         for (id, new_viewport) in viewport_output {
             match self.viewport_output.entry(id) {
-                std::collections::hash_map::Entry::Vacant(entry) => {
+                Entry::Vacant(entry) => {
                     entry.insert(new_viewport);
                 }
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                Entry::Occupied(mut entry) => {
                     entry.get_mut().append(new_viewport);
                 }
             }
         }
     }
+
+    /// [`epaint::textures::TexturesDelta`] will panic when dropped with still unapplied deltas,
+    /// this is a helper to clear the deltas.
+    pub fn drop_without_applying_deltas(mut self) {
+        self.textures_delta.clear();
+    }
+}
+
+/// What egui emits from [`crate::Context::run_logic`], i.e. from a tick where no ui was shown.
+///
+/// There is nothing to paint, but the app may still have asked the integration to do things,
+/// e.g. to show a hidden window again with [`crate::ViewportCommand::Focus`].
+#[derive(Clone, Default)]
+pub struct LogicOutput {
+    /// Non-rendering related output.
+    pub platform_output: PlatformOutput,
+
+    /// The commands sent with [`crate::Context::send_viewport_cmd`] and friends.
+    ///
+    /// Note that this contains no information about which viewports exist:
+    /// the integration should leave its viewports as they are.
+    pub viewport_commands: OrderedViewportIdMap<Vec<crate::ViewportCommand>>,
 }
 
 /// Information about text being edited.
@@ -70,6 +98,9 @@ impl FullOutput {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct IMEOutput {
+    /// IME's purpose.
+    pub purpose: crate::IMEPurpose,
+
     /// Where the [`crate::TextEdit`] is located on screen.
     pub rect: crate::Rect,
 
@@ -77,6 +108,27 @@ pub struct IMEOutput {
     ///
     /// This is a very thin rectangle.
     pub cursor_rect: crate::Rect,
+
+    /// Whether any ongoing IME composition should be interrupted.
+    pub should_interrupt_composition: bool,
+}
+
+/// Commands that the egui integration should execute at the end of a frame.
+///
+/// Commands that are specific to a viewport should be put in [`crate::ViewportCommand`] instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub enum OutputCommand {
+    /// Put this text to the system clipboard.
+    ///
+    /// This is often a response to [`crate::Event::Copy`] or [`crate::Event::Cut`].
+    CopyText(String),
+
+    /// Put this image to the system clipboard.
+    CopyImage(crate::ColorImage),
+
+    /// Open this url in a browser.
+    OpenUrl(OpenUrl),
 }
 
 /// The non-rendering part of what egui emits each frame.
@@ -87,24 +139,21 @@ pub struct IMEOutput {
 #[derive(Default, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct PlatformOutput {
+    /// Commands that the egui integration should execute at the end of a frame.
+    pub commands: Vec<OutputCommand>,
+
     /// Set the cursor to this icon.
     pub cursor_icon: CursorIcon,
 
-    /// If set, open this url.
-    pub open_url: Option<OpenUrl>,
-
-    /// If set, put this text in the system clipboard. Ignore if empty.
+    /// If set, the integration should display this RGBA image as the OS
+    /// cursor (via e.g. `winit::window::CustomCursor`) instead of the
+    /// standard `cursor_icon`. Set per frame; integrations that don't
+    /// support custom cursors fall back to `cursor_icon`.
     ///
-    /// This is often a response to [`crate::Event::Copy`] or [`crate::Event::Cut`].
-    ///
-    /// ```
-    /// # egui::__run_test_ui(|ui| {
-    /// if ui.button("📋").clicked() {
-    ///     ui.output_mut(|o| o.copied_text = "some_text".to_string());
-    /// }
-    /// # });
-    /// ```
-    pub copied_text: String,
+    /// Skipped from serde because the bitmap is ephemeral and shouldn't
+    /// roundtrip through persisted state.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub cursor_image: Option<CustomCursorImage>,
 
     /// Events that may be useful to e.g. a screen reader.
     pub events: Vec<OutputEvent>,
@@ -116,12 +165,14 @@ pub struct PlatformOutput {
     /// This is set if, and only if, the user is currently editing text.
     ///
     /// Useful for IME.
+    ///
+    /// This field should only be set by the widget that currently owns IME
+    /// events (see [`crate::Memory::owns_ime_events`]).
     pub ime: Option<IMEOutput>,
 
     /// The difference in the widget tree since last frame.
     ///
     /// NOTE: this needs to be per-viewport.
-    #[cfg(feature = "accesskit")]
     pub accesskit_update: Option<accesskit::TreeUpdate>,
 
     /// How many ui passes is this the sum of?
@@ -163,25 +214,20 @@ impl PlatformOutput {
     /// Add on new output.
     pub fn append(&mut self, newer: Self) {
         let Self {
+            mut commands,
             cursor_icon,
-            open_url,
-            copied_text,
+            cursor_image,
             mut events,
             mutable_text_under_cursor,
             ime,
-            #[cfg(feature = "accesskit")]
             accesskit_update,
             num_completed_passes,
             mut request_discard_reasons,
         } = newer;
 
+        self.commands.append(&mut commands);
         self.cursor_icon = cursor_icon;
-        if open_url.is_some() {
-            self.open_url = open_url;
-        }
-        if !copied_text.is_empty() {
-            self.copied_text = copied_text;
-        }
+        self.cursor_image = cursor_image;
         self.events.append(&mut events);
         self.mutable_text_under_cursor = mutable_text_under_cursor;
         self.ime = ime.or(self.ime);
@@ -189,18 +235,16 @@ impl PlatformOutput {
         self.request_discard_reasons
             .append(&mut request_discard_reasons);
 
-        #[cfg(feature = "accesskit")]
-        {
-            // egui produces a complete AccessKit tree for each frame,
-            // so overwrite rather than appending.
-            self.accesskit_update = accesskit_update;
-        }
+        // egui produces a complete AccessKit tree for each frame, so overwrite rather than append:
+        self.accesskit_update = accesskit_update;
     }
 
-    /// Take everything ephemeral (everything except `cursor_icon` currently)
+    /// Take everything ephemeral (everything except `cursor_icon` and
+    /// `cursor_image` currently)
     pub fn take(&mut self) -> Self {
-        let taken = std::mem::take(self);
-        self.cursor_icon = taken.cursor_icon; // everything else is ephemeral
+        let taken = core::mem::take(self);
+        self.cursor_icon = taken.cursor_icon; // sticky between frames
+        self.cursor_image = taken.cursor_image.clone(); // sticky between frames
         taken
     }
 
@@ -213,7 +257,7 @@ impl PlatformOutput {
 /// What URL to open, and how.
 ///
 /// Use with [`crate::Context::open_url`].
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct OpenUrl {
     pub url: String,
@@ -225,7 +269,7 @@ pub struct OpenUrl {
 }
 
 impl OpenUrl {
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     pub fn same_tab(url: impl ToString) -> Self {
         Self {
             url: url.to_string(),
@@ -233,7 +277,7 @@ impl OpenUrl {
         }
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     pub fn new_tab(url: impl ToString) -> Self {
         Self {
             url: url.to_string(),
@@ -260,15 +304,49 @@ pub enum UserAttentionType {
     Reset,
 }
 
+/// A bitmap cursor pushed to the integration via [`PlatformOutput::cursor_image`].
+///
+/// The integration is expected to upload this to the OS as a real cursor
+/// (so the image is not clipped by the egui window — what `egui::Painter`
+/// drawn cursors suffer from). Backends that don't support it should fall
+/// back to [`PlatformOutput::cursor_icon`].
+///
+/// `rgba` is straight (non-premultiplied) RGBA — same encoding as
+/// `winit::window::CustomCursor::from_rgba`. The buffer length must be
+/// exactly `size[0] * size[1] * 4` bytes. `size` and `hotspot` use
+/// `u16` to match winit's native types and avoid a lossy cast in the
+/// integration layer.
+///
+/// `Arc<[u8]>` is used so integrations can dedupe / cache by pointer
+/// identity (`Arc::ptr_eq`) and avoid re-uploading the same bitmap to
+/// the OS every frame.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CustomCursorImage {
+    pub rgba: std::sync::Arc<[u8]>,
+    pub size: [u16; 2],
+    pub hotspot: [u16; 2],
+}
+
+impl core::fmt::Debug for CustomCursorImage {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CustomCursorImage")
+            .field("size", &self.size)
+            .field("hotspot", &self.hotspot)
+            .field("rgba_len", &self.rgba.len())
+            .finish()
+    }
+}
+
 /// A mouse cursor icon.
 ///
 /// egui emits a [`CursorIcon`] in [`PlatformOutput`] each frame as a request to the integration.
 ///
 /// Loosely based on <https://developer.mozilla.org/en-US/docs/Web/CSS/cursor>.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum CursorIcon {
     /// Normal cursor icon, whatever that is.
+    #[default]
     Default,
 
     /// Show no cursor
@@ -428,12 +506,6 @@ impl CursorIcon {
     ];
 }
 
-impl Default for CursorIcon {
-    fn default() -> Self {
-        Self::Default
-    }
-}
-
 /// Things that happened during this frame that the integration may be interested in.
 ///
 /// In particular, these events may be useful for accessibility, i.e. for screen readers.
@@ -472,8 +544,8 @@ impl OutputEvent {
     }
 }
 
-impl std::fmt::Debug for OutputEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for OutputEvent {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Clicked(wi) => write!(f, "Clicked({wi:?})"),
             Self::DoubleClicked(wi) => write!(f, "DoubleClicked({wi:?})"),
@@ -511,11 +583,16 @@ pub struct WidgetInfo {
     pub value: Option<f64>,
 
     /// Selected range of characters in [`Self::current_text_value`].
-    pub text_selection: Option<std::ops::RangeInclusive<usize>>,
+    ///
+    /// The range is `start..end` in *character* offsets (not bytes), with `end` exclusive.
+    pub text_selection: Option<Range<CharIndex>>,
+
+    /// The hint text for text edit fields.
+    pub hint_text: Option<String>,
 }
 
-impl std::fmt::Debug for WidgetInfo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for WidgetInfo {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let Self {
             typ,
             enabled,
@@ -525,6 +602,7 @@ impl std::fmt::Debug for WidgetInfo {
             selected,
             value,
             text_selection,
+            hint_text,
         } = self;
 
         let mut s = f.debug_struct("WidgetInfo");
@@ -553,6 +631,9 @@ impl std::fmt::Debug for WidgetInfo {
         if let Some(text_selection) = text_selection {
             s.field("text_selection", text_selection);
         }
+        if let Some(hint_text) = hint_text {
+            s.field("hint_text", hint_text);
+        }
 
         s.finish()
     }
@@ -569,10 +650,11 @@ impl WidgetInfo {
             selected: None,
             value: None,
             text_selection: None,
+            hint_text: None,
         }
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     pub fn labeled(typ: WidgetType, enabled: bool, label: impl ToString) -> Self {
         Self {
             enabled,
@@ -582,7 +664,7 @@ impl WidgetInfo {
     }
 
     /// checkboxes, radio-buttons etc
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     pub fn selected(typ: WidgetType, enabled: bool, selected: bool, label: impl ToString) -> Self {
         Self {
             enabled,
@@ -600,7 +682,7 @@ impl WidgetInfo {
         }
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     pub fn slider(enabled: bool, value: f64, label: impl ToString) -> Self {
         let label = label.to_string();
         Self {
@@ -611,14 +693,16 @@ impl WidgetInfo {
         }
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     pub fn text_edit(
         enabled: bool,
         prev_text_value: impl ToString,
         text_value: impl ToString,
+        hint_text: impl ToString,
     ) -> Self {
         let text_value = text_value.to_string();
         let prev_text_value = prev_text_value.to_string();
+        let hint_text = hint_text.to_string();
         let prev_text_value = if text_value == prev_text_value {
             None
         } else {
@@ -628,14 +712,15 @@ impl WidgetInfo {
             enabled,
             current_text_value: Some(text_value),
             prev_text_value,
+            hint_text: Some(hint_text),
             ..Self::new(WidgetType::TextEdit)
         }
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     pub fn text_selection_changed(
         enabled: bool,
-        text_selection: std::ops::RangeInclusive<usize>,
+        text_selection: Range<CharIndex>,
         current_text_value: impl ToString,
     ) -> Self {
         Self {
@@ -657,6 +742,7 @@ impl WidgetInfo {
             selected,
             value,
             text_selection: _,
+            hint_text: _,
         } = self;
 
         // TODO(emilk): localization
@@ -672,9 +758,13 @@ impl WidgetInfo {
             WidgetType::Slider => "slider",
             WidgetType::DragValue => "drag value",
             WidgetType::ColorButton => "color button",
-            WidgetType::ImageButton => "image button",
+            WidgetType::Image => "image",
             WidgetType::CollapsingHeader => "collapsing header",
+            WidgetType::Panel => "panel",
             WidgetType::ProgressIndicator => "progress indicator",
+            WidgetType::Window => "window",
+            WidgetType::ScrollBar => "scroll bar",
+            WidgetType::ResizeHandle => "resize handle",
             WidgetType::Label | WidgetType::Other => "",
         };
 
@@ -686,7 +776,7 @@ impl WidgetInfo {
                 description = format!("{state} {description}");
             } else {
                 description += if *selected { "selected" } else { "" };
-            };
+            }
         }
 
         if let Some(label) = label {
@@ -698,7 +788,7 @@ impl WidgetInfo {
                 if text_value.is_empty() {
                     "blank".into()
                 } else {
-                    text_value.to_string()
+                    text_value.clone()
                 }
             } else {
                 "blank".into()

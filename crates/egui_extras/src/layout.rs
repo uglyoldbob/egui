@@ -1,4 +1,4 @@
-use egui::{Id, Pos2, Rect, Response, Sense, Ui, UiBuilder};
+use egui::{Id, Pos2, Rect, Response, Sense, Ui, UiBuilder, emath::GuiRounding as _};
 
 #[derive(Clone, Copy)]
 pub(crate) enum CellSize {
@@ -33,8 +33,9 @@ pub(crate) struct StripLayoutFlags {
     pub(crate) striped: bool,
     pub(crate) hovered: bool,
     pub(crate) selected: bool,
+    pub(crate) overline: bool,
 
-    /// Used when we want to accruately measure the size of this cell.
+    /// Used when we want to accurately measure the size of this cell.
     pub(crate) sizing_pass: bool,
 }
 
@@ -123,12 +124,12 @@ impl<'l> StripLayout<'l> {
 
         // Make sure we don't have a gap in the stripe/frame/selection background:
         let item_spacing = self.ui.spacing().item_spacing;
-        let gapless_rect = max_rect.expand2(0.5 * item_spacing);
+        let gapless_rect = max_rect.expand2(0.5 * item_spacing).round_ui();
 
         if flags.striped {
             self.ui.painter().rect_filled(
                 gapless_rect,
-                egui::Rounding::ZERO,
+                egui::CornerRadius::ZERO,
                 self.ui.visuals().faint_bg_color,
             );
         }
@@ -136,7 +137,7 @@ impl<'l> StripLayout<'l> {
         if flags.selected {
             self.ui.painter().rect_filled(
                 gapless_rect,
-                egui::Rounding::ZERO,
+                egui::CornerRadius::ZERO,
                 self.ui.visuals().selection.bg_fill,
             );
         }
@@ -144,7 +145,7 @@ impl<'l> StripLayout<'l> {
         if flags.hovered && !flags.selected && self.sense.interactive() {
             self.ui.painter().rect_filled(
                 gapless_rect,
-                egui::Rounding::ZERO,
+                egui::CornerRadius::ZERO,
                 self.ui.visuals().widgets.hovered.bg_fill,
             );
         }
@@ -161,7 +162,7 @@ impl<'l> StripLayout<'l> {
         } else if flags.clip {
             max_rect
         } else {
-            max_rect.union(used_rect)
+            max_rect | used_rect
         };
 
         self.set_pos(allocation_rect);
@@ -216,10 +217,7 @@ impl<'l> StripLayout<'l> {
         let mut child_ui = self.ui.new_child(ui_builder);
 
         if flags.clip {
-            let margin = egui::Vec2::splat(self.ui.visuals().clip_rect_margin);
-            let margin = margin.min(0.5 * self.ui.spacing().item_spacing);
-            let clip_rect = max_rect.expand2(margin);
-            child_ui.shrink_clip_rect(clip_rect);
+            child_ui.shrink_clip_rect(max_rect);
 
             if !child_ui.is_sizing_pass() {
                 // Better to truncate (if we can), rather than hard clipping:
@@ -230,6 +228,14 @@ impl<'l> StripLayout<'l> {
         if flags.selected {
             let stroke_color = child_ui.style().visuals.selection.stroke.color;
             child_ui.style_mut().visuals.override_text_color = Some(stroke_color);
+        }
+
+        if flags.overline {
+            child_ui.painter().hline(
+                max_rect.x_range(),
+                max_rect.top(),
+                child_ui.visuals().widgets.noninteractive.bg_stroke,
+            );
         }
 
         add_cell_contents(&mut child_ui);

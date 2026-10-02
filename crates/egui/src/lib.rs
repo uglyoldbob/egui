@@ -3,13 +3,13 @@
 //! Try the live web demo: <https://www.egui.rs/#demo>. Read more about egui at <https://github.com/emilk/egui>.
 //!
 //! `egui` is in heavy development, with each new version having breaking changes.
-//! You need to have rust 1.76.0 or later to use `egui`.
+//! You need to have rust 1.95.0 or later to use `egui`.
 //!
 //! To quickly get started with egui, you can take a look at [`eframe_template`](https://github.com/emilk/eframe_template)
 //! which uses [`eframe`](https://docs.rs/eframe).
 //!
 //! To create a GUI using egui you first need a [`Context`] (by convention referred to by `ctx`).
-//! Then you add a [`Window`] or a [`SidePanel`] to get a [`Ui`], which is what you'll be using to add all the buttons and labels that you need.
+//! Then you add a [`Window`] or a [`Panel`] to get a [`Ui`], which is what you'll be using to add all the buttons and labels that you need.
 //!
 //!
 //! ## Feature flags
@@ -42,23 +42,6 @@
 //!
 //! In some GUI frameworks this would require defining multiple types and functions with callbacks or message handlers,
 //! but thanks to `egui` being immediate mode everything is one self-contained function!
-//!
-//! ### Getting a [`Ui`]
-//!
-//! Use one of [`SidePanel`], [`TopBottomPanel`], [`CentralPanel`], [`Window`] or [`Area`] to
-//! get access to an [`Ui`] where you can put widgets. For example:
-//!
-//! ```
-//! # egui::__run_test_ctx(|ctx| {
-//! egui::CentralPanel::default().show(&ctx, |ui| {
-//!     ui.add(egui::Label::new("Hello World!"));
-//!     ui.label("A shorter and more convenient way to add a label.");
-//!     if ui.button("Click me").clicked() {
-//!         // take some action here
-//!     }
-//! });
-//! # });
-//! ```
 //!
 //! ### Quick start
 //!
@@ -129,8 +112,8 @@
 //! loop {
 //!     let raw_input: egui::RawInput = gather_input();
 //!
-//!     let full_output = ctx.run(raw_input, |ctx| {
-//!         egui::CentralPanel::default().show(&ctx, |ui| {
+//!     let full_output = ctx.run_ui(raw_input, |ui| {
+//!         egui::CentralPanel::default().show(ui, |ui| {
 //!             ui.label("Hello world!");
 //!             if ui.button("Click me").clicked() {
 //!                 // take some action here
@@ -143,7 +126,7 @@
 //! }
 //! ```
 //!
-//! For a reference OpenGL renderer, see [the `egui_glow` painter](https://github.com/emilk/egui/blob/master/crates/egui_glow/src/painter.rs).
+//! For a reference OpenGL renderer, see [the `egui_glow` painter](https://github.com/emilk/egui/blob/main/crates/egui_glow/src/painter.rs).
 //!
 //!
 //! ### Debugging your renderer
@@ -161,12 +144,10 @@
 //!
 //! * egui uses premultiplied alpha, so make sure your blending function is `(ONE, ONE_MINUS_SRC_ALPHA)`.
 //! * Make sure your texture sampler is clamped (`GL_CLAMP_TO_EDGE`).
-//! * egui prefers linear color spaces for all blending so:
-//!   * Use an sRGBA-aware texture if available (e.g. `GL_SRGB8_ALPHA8`).
-//!     * Otherwise: remember to decode gamma in the fragment shader.
-//!   * Decode the gamma of the incoming vertex colors in your vertex shader.
-//!   * Turn on sRGBA/linear framebuffer if available (`GL_FRAMEBUFFER_SRGB`).
-//!     * Otherwise: gamma-encode the colors before you write them again.
+//! * egui prefers gamma color spaces for all blending so:
+//!   * Do NOT use an sRGBA-aware texture (NOT `GL_SRGB8_ALPHA8`).
+//!   * Multiply texture and vertex colors in gamma space
+//!   * Turn OFF sRGBA/gamma framebuffer (NO `GL_FRAMEBUFFER_SRGB`).
 //!
 //!
 //! # Understanding immediate mode
@@ -197,7 +178,7 @@
 //! * lays out the letters `click me` in order to figure out the size of the button
 //! * decides where on screen to place the button
 //! * check if the mouse is hovering or clicking that location
-//! * chose button colors based on if it is being hovered or clicked
+//! * choose button colors based on if it is being hovered or clicked
 //! * add a [`Shape::Rect`] and [`Shape::Text`] to the list of shapes to be painted later this frame
 //! * return a [`Response`] with the [`clicked`](`Response::clicked`) member so the user can check for interactions
 //!
@@ -219,7 +200,7 @@
 //! This means it is responsibility of the egui user to store the state (`value`) so that it persists between frames.
 //!
 //! It can be useful to read the code for the toggle switch example widget to get a better understanding
-//! of how egui works: <https://github.com/emilk/egui/blob/master/crates/egui_demo_lib/src/demo/toggle_switch.rs>.
+//! of how egui works: <https://github.com/emilk/egui/blob/main/crates/egui_demo_lib/src/demo/toggle_switch.rs>.
 //!
 //! Read more about the pros and cons of immediate mode at <https://github.com/emilk/egui#why-immediate-mode>.
 //!
@@ -324,7 +305,7 @@
 //! when you release the panel/window shrinks again.
 //! This is an artifact of immediate mode, and here are some alternatives on how to avoid it:
 //!
-//! 1. Turn off resizing with [`Window::resizable`], [`SidePanel::resizable`], [`TopBottomPanel::resizable`].
+//! 1. Turn off resizing with [`Window::resizable`], [`Panel::resizable`].
 //! 2. Wrap your panel contents in a [`ScrollArea`], or use [`Window::vscroll`] and [`Window::hscroll`].
 //! 3. Use a justified layout:
 //!
@@ -388,11 +369,28 @@
 //! ## Installing additional fonts
 //! The default egui fonts only support latin and cryllic characters, and some emojis.
 //! To use egui with e.g. asian characters you need to install your own font (`.ttf` or `.otf`) using [`Context::set_fonts`].
+//!
+//! ## Instrumentation
+//! This crate supports using the [profiling](https://crates.io/crates/profiling) crate for instrumentation.
+//! You can enable features on the profiling crates in your application to add instrumentation for all
+//! crates that support it, including egui. See the profiling crate docs for more information.
+//! ```toml
+//! [dependencies]
+//! profiling = "1.0"
+//! [features]
+//! profile-with-puffin = ["profiling/profile-with-puffin"]
+//! ```
+//!
+//! ## Custom allocator
+//! egui apps can run significantly (~20%) faster by using a custom allocator, like [mimalloc](https://crates.io/crates/mimalloc) or [talc](https://crates.io/crates/talc).
+//!
 
-#![allow(clippy::float_cmp)]
-#![allow(clippy::manual_range_contains)]
+#![expect(clippy::float_cmp)]
+#![expect(clippy::manual_range_contains)]
 
 mod animation_manager;
+mod atomics;
+pub mod cache;
 pub mod containers;
 mod context;
 mod data;
@@ -402,6 +400,7 @@ pub(crate) mod grid;
 pub mod gui_zoom;
 mod hit_test;
 mod id;
+mod id_salt;
 mod input_state;
 mod interaction;
 pub mod introspection;
@@ -409,12 +408,12 @@ pub mod layers;
 mod layout;
 pub mod load;
 mod memory;
-pub mod menu;
 pub mod os;
 mod painter;
 mod pass_state;
 pub(crate) mod placer;
-mod response;
+pub mod plugin;
+pub mod response;
 mod sense;
 pub mod style;
 pub mod text_selection;
@@ -424,6 +423,7 @@ mod ui_stack;
 pub mod util;
 pub mod viewport;
 mod widget_rect;
+pub mod widget_style;
 pub mod widget_text;
 pub mod widgets;
 
@@ -431,11 +431,7 @@ pub mod widgets;
 #[cfg(debug_assertions)]
 mod callstack;
 
-#[cfg(feature = "accesskit")]
 pub use accesskit;
-
-#[deprecated = "Use the ahash crate directly."]
-pub use ahash;
 
 pub use epaint;
 pub use epaint::ecolor;
@@ -445,53 +441,57 @@ pub use epaint::emath;
 pub use ecolor::hex_color;
 pub use ecolor::{Color32, Rgba};
 pub use emath::{
-    lerp, pos2, remap, remap_clamp, vec2, Align, Align2, NumExt, Pos2, Rangef, Rect, Vec2, Vec2b,
+    Align, Align2, NumExt, Pos2, Rangef, Rect, RectAlign, Vec2, Vec2b, lerp, pos2, remap,
+    remap_clamp, vec2,
 };
 pub use epaint::{
-    mutex,
+    ClippedPrimitive, ColorImage, CornerRadius, Direction, ImageData, Margin, Mesh, PaintCallback,
+    PaintCallbackInfo, Shadow, Shape, Stroke, StrokeKind, TextureHandle, TextureId, mutex,
     text::{FontData, FontDefinitions, FontFamily, FontId, FontTweak},
     textures::{TextureFilter, TextureOptions, TextureWrapMode, TexturesDelta},
-    ClippedPrimitive, ColorImage, FontImage, ImageData, Margin, Mesh, PaintCallback,
-    PaintCallbackInfo, Rounding, Shadow, Shape, Stroke, TextureHandle, TextureId,
 };
 
 pub mod text {
-    pub use crate::text_selection::{CCursorRange, CursorRange};
+    pub use crate::text_selection::CCursorRange;
     pub use epaint::text::{
-        cursor::CCursor, FontData, FontDefinitions, FontFamily, Fonts, Galley, LayoutJob,
-        LayoutSection, TextFormat, TextWrapping, TAB_SIZE,
+        ByteIndex, ByteRange, CharIndex, CharRange, FontData, FontDefinitions, FontFamily, Fonts,
+        Galley, LayoutJob, LayoutSection, TextFormat, TextWrapping, cursor::CCursor,
     };
 }
 
 pub use self::{
-    containers::*,
+    atomics::*,
+    containers::{menu::MenuBar, *},
     context::{Context, RepaintCause, RequestRepaintInfo},
     data::{
+        Key, UserData,
         input::*,
         output::{
-            self, CursorIcon, FullOutput, OpenUrl, PlatformOutput, UserAttentionType, WidgetInfo,
+            self, CursorIcon, CustomCursorImage, FullOutput, LogicOutput, OpenUrl, OutputCommand,
+            PlatformOutput, UserAttentionType, WidgetInfo,
         },
-        Key,
     },
     drag_and_drop::DragAndDrop,
     epaint::text::TextWrapMode,
     grid::Grid,
-    id::{Id, IdMap},
-    input_state::{InputState, MultiTouchInfo, PointerState},
+    id::{AsId, Id, IdMap, IdSet},
+    id_salt::{AsIdSalt, IdSalt},
+    input_state::{InputOptions, InputState, MultiTouchInfo, PointerState, SurrenderFocusOn},
     layers::{LayerId, Order},
     layout::*,
     load::SizeHint,
-    memory::{Memory, Options, Theme, ThemePreference},
+    memory::{FocusDirection, Memory, Options, Theme, ThemePreference},
     painter::Painter,
+    plugin::Plugin,
     response::{InnerResponse, Response},
     sense::Sense,
     style::{FontSelection, Spacing, Style, TextStyle, Visuals},
     text::{Galley, TextFormat},
     ui::Ui,
-    ui_builder::UiBuilder,
+    ui_builder::{IdSource, UiBuilder},
     ui_stack::*,
     viewport::*,
-    widget_rect::{WidgetRect, WidgetRects},
+    widget_rect::{InteractOptions, WidgetRect, WidgetRects},
     widget_text::{RichText, WidgetText},
     widgets::*,
 };
@@ -524,7 +524,7 @@ pub fn warn_if_debug_build(ui: &mut crate::Ui) {
 /// ui.add(
 ///     egui::Image::new(egui::include_image!("../assets/ferris.png"))
 ///         .max_width(200.0)
-///         .rounding(10.0),
+///         .corner_radius(10),
 /// );
 ///
 /// let image_source: egui::ImageSource = egui::include_image!("../assets/ferris.png");
@@ -545,7 +545,7 @@ macro_rules! include_image {
 ///
 /// ```
 /// # egui::__run_test_ui(|ui| {
-/// ui.add(egui::github_link_file_line!("https://github.com/YOUR/PROJECT/blob/master/", "(source code)"));
+/// ui.add(egui::github_link_file_line!("https://github.com/YOUR/PROJECT/blob/main/", "(source code)"));
 /// # });
 /// ```
 #[macro_export]
@@ -560,7 +560,7 @@ macro_rules! github_link_file_line {
 ///
 /// ```
 /// # egui::__run_test_ui(|ui| {
-/// ui.add(egui::github_link_file!("https://github.com/YOUR/PROJECT/blob/master/", "(source code)"));
+/// ui.add(egui::github_link_file!("https://github.com/YOUR/PROJECT/blob/main/", "(source code)"));
 /// # });
 /// ```
 #[macro_export]
@@ -611,9 +611,6 @@ pub mod special_emojis {
     /// The Github logo.
     pub const GITHUB: char = '';
 
-    /// The Twitter bird.
-    pub const TWITTER: char = '';
-
     /// The word `git`.
     pub const GIT: char = '';
 
@@ -650,11 +647,19 @@ pub enum WidgetType {
 
     ColorButton,
 
-    ImageButton,
+    Image,
 
     CollapsingHeader,
 
+    Panel,
+
     ProgressIndicator,
+
+    Window,
+
+    ResizeHandle,
+
+    ScrollBar,
 
     /// If you cannot fit any of the above slots.
     ///
@@ -668,53 +673,22 @@ pub enum WidgetType {
 pub fn __run_test_ctx(mut run_ui: impl FnMut(&Context)) {
     let ctx = Context::default();
     ctx.set_fonts(FontDefinitions::empty()); // prevent fonts from being loaded (save CPU time)
-    let _ = ctx.run(Default::default(), |ctx| {
-        run_ui(ctx);
+    let output = ctx.run_ui(Default::default(), |ui| {
+        run_ui(ui.ctx());
     });
+    output.drop_without_applying_deltas();
 }
 
 /// For use in tests; especially doctests.
-pub fn __run_test_ui(add_contents: impl Fn(&mut Ui)) {
+pub fn __run_test_ui(mut add_contents: impl FnMut(&mut Ui)) {
     let ctx = Context::default();
     ctx.set_fonts(FontDefinitions::empty()); // prevent fonts from being loaded (save CPU time)
-    let _ = ctx.run(Default::default(), |ctx| {
-        crate::CentralPanel::default().show(ctx, |ui| {
-            add_contents(ui);
-        });
+    let output = ctx.run_ui(Default::default(), |ui| {
+        add_contents(ui);
     });
+    output.drop_without_applying_deltas();
 }
 
-#[cfg(feature = "accesskit")]
 pub fn accesskit_root_id() -> Id {
     Id::new("accesskit_root")
 }
-
-// ---------------------------------------------------------------------------
-
-mod profiling_scopes {
-    #![allow(unused_macros)]
-    #![allow(unused_imports)]
-
-    /// Profiling macro for feature "puffin"
-    macro_rules! profile_function {
-        ($($arg: tt)*) => {
-            #[cfg(feature = "puffin")]
-            #[cfg(not(target_arch = "wasm32"))] // Disabled on web because of the coarse 1ms clock resolution there.
-            puffin::profile_function!($($arg)*);
-        };
-    }
-    pub(crate) use profile_function;
-
-    /// Profiling macro for feature "puffin"
-    macro_rules! profile_scope {
-        ($($arg: tt)*) => {
-            #[cfg(feature = "puffin")]
-            #[cfg(not(target_arch = "wasm32"))] // Disabled on web because of the coarse 1ms clock resolution there.
-            puffin::profile_scope!($($arg)*);
-        };
-    }
-    pub(crate) use profile_scope;
-}
-
-#[allow(unused_imports)]
-pub(crate) use profiling_scopes::{profile_function, profile_scope};

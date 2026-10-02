@@ -2,7 +2,7 @@
 
 use web_time::Instant;
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 use winit::event_loop::ActiveEventLoop;
 
 use raw_window_handle::{HasDisplayHandle as _, HasWindowHandle as _};
@@ -19,7 +19,7 @@ pub fn viewport_builder(
     native_options: &mut epi::NativeOptions,
     window_settings: Option<WindowSettings>,
 ) -> ViewportBuilder {
-    crate::profile_function!();
+    profiling::function_scope!();
 
     let mut viewport_builder = native_options.viewport.clone();
 
@@ -52,14 +52,13 @@ pub fn viewport_builder(
             viewport_builder = viewport_builder.with_position(pos);
         }
 
-        if clamp_size_to_monitor_size {
-            if let Some(initial_window_size) = viewport_builder.inner_size {
-                let initial_window_size = egui::NumExt::at_most(
-                    initial_window_size,
-                    largest_monitor_point_size(egui_zoom_factor, event_loop),
-                );
-                viewport_builder = viewport_builder.with_inner_size(initial_window_size);
-            }
+        if clamp_size_to_monitor_size && let Some(initial_window_size) = viewport_builder.inner_size
+        {
+            let initial_window_size = egui::NumExt::at_most(
+                initial_window_size,
+                largest_monitor_point_size(egui_zoom_factor, event_loop),
+            );
+            viewport_builder = viewport_builder.with_inner_size(initial_window_size);
         }
 
         viewport_builder.inner_size
@@ -67,7 +66,7 @@ pub fn viewport_builder(
 
     #[cfg(not(target_os = "ios"))]
     if native_options.centered {
-        crate::profile_scope!("center");
+        profiling::scope!("center");
         if let Some(monitor) = event_loop
             .primary_monitor()
             .or_else(|| event_loop.available_monitors().next())
@@ -84,7 +83,7 @@ pub fn viewport_builder(
         }
     }
 
-    match std::mem::take(&mut native_options.window_builder) {
+    match core::mem::take(&mut native_options.window_builder) {
         Some(hook) => hook(viewport_builder),
         None => viewport_builder,
     }
@@ -94,8 +93,7 @@ pub fn apply_window_settings(
     window: &winit::window::Window,
     window_settings: Option<WindowSettings>,
 ) {
-    crate::profile_function!();
-
+    profiling::function_scope!();
     if let Some(window_settings) = window_settings {
         window_settings.initialize_window(window);
     }
@@ -103,12 +101,11 @@ pub fn apply_window_settings(
 
 #[cfg(not(target_os = "ios"))]
 fn largest_monitor_point_size(egui_zoom_factor: f32, event_loop: &ActiveEventLoop) -> egui::Vec2 {
-    crate::profile_function!();
-
+    profiling::function_scope!();
     let mut max_size = egui::Vec2::ZERO;
 
     let available_monitors = {
-        crate::profile_scope!("available_monitors");
+        profiling::scope!("available_monitors");
         event_loop.available_monitors()
     };
 
@@ -138,7 +135,7 @@ pub fn create_storage(_app_name: &str) -> Option<Box<dyn epi::Storage>> {
     None
 }
 
-#[allow(clippy::unnecessary_wraps)]
+#[allow(clippy::allow_attributes, clippy::unnecessary_wraps)]
 pub fn create_storage_with_file(_file: impl Into<PathBuf>) -> Option<Box<dyn epi::Storage>> {
     #[cfg(feature = "persistence")]
     return Some(Box::new(
@@ -159,6 +156,11 @@ pub struct EpiIntegration {
     pub beginning: Instant,
     is_first_frame: bool,
     pub egui_ctx: egui::Context,
+
+    /// Input that we have received, but not yet given to egui,
+    /// because we haven't run any pass since (see [`Self::update_logic_only`]).
+    pending_raw_input: egui::RawInput,
+
     pending_full_output: egui::FullOutput,
 
     /// When set, it is time to close the native window.
@@ -171,10 +173,10 @@ pub struct EpiIntegration {
 }
 
 impl EpiIntegration {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::allow_attributes, clippy::too_many_arguments)]
     pub fn new(
         egui_ctx: egui::Context,
-        window: &winit::window::Window,
+        window: &Arc<winit::window::Window>,
         app_name: &str,
         native_options: &crate::NativeOptions,
         storage: Option<Box<dyn epi::Storage>>,
@@ -182,7 +184,9 @@ impl EpiIntegration {
         #[cfg(feature = "glow")] glow_register_native_texture: Option<
             Box<dyn FnMut(glow::Texture) -> egui::TextureId>,
         >,
-        #[cfg(feature = "wgpu")] wgpu_render_state: Option<egui_wgpu::RenderState>,
+        #[cfg(feature = "wgpu_no_default_features")] wgpu_render_state: Option<
+            egui_wgpu::RenderState,
+        >,
     ) -> Self {
         let frame = epi::Frame {
             info: epi::IntegrationInfo { cpu_usage: None },
@@ -191,8 +195,9 @@ impl EpiIntegration {
             gl,
             #[cfg(feature = "glow")]
             glow_register_native_texture,
-            #[cfg(feature = "wgpu")]
+            #[cfg(feature = "wgpu_no_default_features")]
             wgpu_render_state,
+            window: Some(Arc::clone(window)),
             raw_display_handle: window.display_handle().map(|h| h.as_raw()),
             raw_window_handle: window.window_handle().map(|h| h.as_raw()),
         };
@@ -215,15 +220,18 @@ impl EpiIntegration {
         Self {
             frame,
             last_auto_save: Instant::now(),
-            egui_ctx,
+            pending_raw_input: Default::default(),
             pending_full_output: Default::default(),
             close: false,
             can_drag_window: false,
             #[cfg(feature = "persistence")]
             persist_window: native_options.persist_window,
             app_icon_setter,
-            beginning: Instant::now(),
+            beginning: Instant::now()
+                .checked_sub(web_time::Duration::from_secs_f64(egui_ctx.time()))
+                .unwrap_or_else(Instant::now),
             is_first_frame: true,
+            egui_ctx,
         }
     }
 
@@ -238,7 +246,7 @@ impl EpiIntegration {
         egui_winit: &mut egui_winit::State,
         event: &winit::event::WindowEvent,
     ) -> EventResponse {
-        crate::profile_function!(egui_winit::short_window_event_description(event));
+        profiling::function_scope!(egui_winit::short_window_event_description(event));
 
         use winit::event::{ElementState, MouseButton, WindowEvent};
 
@@ -260,45 +268,109 @@ impl EpiIntegration {
 
     /// Run user code - this can create immediate viewports, so hold no locks over this!
     ///
-    /// If `viewport_ui_cb` is None, we are in the root viewport and will call [`crate::App::update`].
+    /// If `viewport_ui_cb` is None, we are in the root viewport and will call
+    /// [`crate::App::logic`] and [`crate::App::ui`].
+    ///
+    /// Only call this when the ui will actually be shown;
+    /// use [`Self::update_logic_only`] otherwise.
     pub fn update(
         &mut self,
         app: &mut dyn epi::App,
         viewport_ui_cb: Option<&DeferredViewportUiCallback>,
-        mut raw_input: egui::RawInput,
+        raw_input: egui::RawInput,
     ) -> egui::FullOutput {
-        raw_input.time = Some(self.beginning.elapsed().as_secs_f64());
+        let raw_input = self.prepare_raw_input(app, raw_input);
 
         let close_requested = raw_input.viewport().close_requested();
 
-        app.raw_input_hook(&self.egui_ctx, &mut raw_input);
+        let is_root_viewport = viewport_ui_cb.is_none();
 
-        let full_output = self.egui_ctx.run(raw_input, |egui_ctx| {
+        let full_output = self.egui_ctx.run_ui(raw_input, |ui| {
             if let Some(viewport_ui_cb) = viewport_ui_cb {
                 // Child viewport
-                crate::profile_scope!("viewport_callback");
-                viewport_ui_cb(egui_ctx);
+                profiling::scope!("viewport_callback");
+                viewport_ui_cb(ui);
             } else {
-                crate::profile_scope!("App::update");
-                app.update(egui_ctx, &mut self.frame);
+                {
+                    profiling::scope!("App::logic");
+                    app.logic(ui.ctx(), &mut self.frame);
+                }
+                {
+                    profiling::scope!("App::ui");
+                    app.ui(ui, &mut self.frame);
+                }
             }
         });
 
-        let is_root_viewport = viewport_ui_cb.is_none();
         if is_root_viewport && close_requested {
             let canceled = full_output.viewport_output[&ViewportId::ROOT]
                 .commands
                 .contains(&egui::ViewportCommand::CancelClose);
-            if canceled {
-                log::debug!("Closing of root viewport canceled with ViewportCommand::CancelClose");
-            } else {
-                log::debug!("Closing root viewport (ViewportCommand::CancelClose was not sent)");
-                self.close = true;
-            }
+            self.handle_close_request(canceled);
         }
 
         self.pending_full_output.append(full_output);
-        std::mem::take(&mut self.pending_full_output)
+        core::mem::take(&mut self.pending_full_output)
+    }
+
+    /// Let the app tick its logic without showing any ui,
+    /// because the window is minimized or occluded.
+    ///
+    /// No egui pass is run, so all ui state is left untouched:
+    /// the app will find everything where it left it once the window is visible again.
+    ///
+    /// Only call this for the root viewport: only it has [`crate::App::logic`].
+    pub fn update_logic_only(
+        &mut self,
+        app: &mut dyn epi::App,
+        raw_input: egui::RawInput,
+    ) -> egui::LogicOutput {
+        let raw_input = self.prepare_raw_input(app, raw_input);
+
+        let close_requested = raw_input.viewport().close_requested();
+
+        let logic_output = self.egui_ctx.run_logic(&raw_input, |ctx| {
+            profiling::scope!("App::logic");
+            app.logic(ctx, &mut self.frame);
+        });
+
+        // No pass consumed the input, so save it for the next one:
+        self.pending_raw_input = raw_input;
+
+        if close_requested {
+            let canceled = logic_output
+                .viewport_commands
+                .get(&ViewportId::ROOT)
+                .is_some_and(|commands| commands.contains(&egui::ViewportCommand::CancelClose));
+            self.handle_close_request(canceled);
+        }
+
+        logic_output
+    }
+
+    /// Prepend any input we couldn't give to egui earlier, set the time, and run the app hook.
+    fn prepare_raw_input(
+        &mut self,
+        app: &mut dyn epi::App,
+        new_input: egui::RawInput,
+    ) -> egui::RawInput {
+        let mut raw_input = core::mem::take(&mut self.pending_raw_input);
+        raw_input.append(new_input); // The new input wins where they overlap
+
+        raw_input.time = Some(self.beginning.elapsed().as_secs_f64());
+
+        app.raw_input_hook(&self.egui_ctx, &mut raw_input);
+
+        raw_input
+    }
+
+    fn handle_close_request(&mut self, canceled: bool) {
+        if canceled {
+            log::debug!("Closing of root viewport canceled with ViewportCommand::CancelClose");
+        } else {
+            log::debug!("Closing root viewport (ViewportCommand::CancelClose was not sent)");
+            self.close = true;
+        }
     }
 
     pub fn report_frame_time(&mut self, seconds: f32) {
@@ -306,8 +378,8 @@ impl EpiIntegration {
     }
 
     pub fn post_rendering(&mut self, window: &winit::window::Window) {
-        crate::profile_function!();
-        if std::mem::take(&mut self.is_first_frame) {
+        profiling::function_scope!();
+        if core::mem::take(&mut self.is_first_frame) {
             // We keep hidden until we've painted something. See https://github.com/emilk/egui/pull/2279
             window.set_visible(true);
         }
@@ -328,40 +400,43 @@ impl EpiIntegration {
         }
     }
 
-    #[allow(clippy::unused_self)]
-    pub fn save(&mut self, _app: &mut dyn epi::App, _window: Option<&winit::window::Window>) {
+    pub fn save(&mut self, app: &mut dyn epi::App, window: Option<&winit::window::Window>) {
+        #[cfg(not(feature = "persistence"))]
+        let _ = (self, app, window);
+
         #[cfg(feature = "persistence")]
         if let Some(storage) = self.frame.storage_mut() {
-            crate::profile_function!();
+            profiling::function_scope!();
 
-            if let Some(window) = _window {
-                if self.persist_window {
-                    crate::profile_scope!("native_window");
-                    epi::set_value(
-                        storage,
-                        STORAGE_WINDOW_KEY,
-                        &WindowSettings::from_window(self.egui_ctx.zoom_factor(), window),
-                    );
-                }
+            if let Some(window) = window
+                && self.persist_window
+            {
+                profiling::scope!("native_window");
+                epi::set_value(
+                    storage,
+                    STORAGE_WINDOW_KEY,
+                    &WindowSettings::from_window(self.egui_ctx.zoom_factor(), window),
+                );
             }
-            if _app.persist_egui_memory() {
-                crate::profile_scope!("egui_memory");
+            if app.persist_egui_memory() {
+                profiling::scope!("egui_memory");
                 self.egui_ctx
                     .memory(|mem| epi::set_value(storage, STORAGE_EGUI_MEMORY_KEY, mem));
             }
             {
-                crate::profile_scope!("App::save");
-                _app.save(storage);
+                profiling::scope!("App::save");
+                app.save(storage);
             }
 
-            crate::profile_scope!("Storage::flush");
+            profiling::scope!("Storage::flush");
             storage.flush();
         }
     }
 }
 
 fn load_default_egui_icon() -> egui::IconData {
-    crate::profile_function!();
+    profiling::function_scope!();
+    #[expect(clippy::unwrap_used)]
     crate::icon_data::from_png_bytes(&include_bytes!("../../data/icon.png")[..]).unwrap()
 }
 
@@ -372,7 +447,7 @@ const STORAGE_EGUI_MEMORY_KEY: &str = "egui";
 const STORAGE_WINDOW_KEY: &str = "window";
 
 pub fn load_window_settings(_storage: Option<&dyn epi::Storage>) -> Option<WindowSettings> {
-    crate::profile_function!();
+    profiling::function_scope!();
     #[cfg(feature = "persistence")]
     {
         epi::get_value(_storage?, STORAGE_WINDOW_KEY)
@@ -382,7 +457,7 @@ pub fn load_window_settings(_storage: Option<&dyn epi::Storage>) -> Option<Windo
 }
 
 pub fn load_egui_memory(_storage: Option<&dyn epi::Storage>) -> Option<egui::Memory> {
-    crate::profile_function!();
+    profiling::function_scope!();
     #[cfg(feature = "persistence")]
     {
         epi::get_value(_storage?, STORAGE_EGUI_MEMORY_KEY)

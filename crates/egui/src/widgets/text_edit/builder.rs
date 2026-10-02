@@ -518,11 +518,6 @@ impl TextEdit<'_> {
 
         let layouter = layouter.unwrap_or(&mut default_layouter);
 
-        let desired_height = (desired_height_rows.at_least(1) as f32) * row_height;
-        let desired_inner_size = vec2(desired_inner_width, galley.size().y.max(desired_height));
-        let desired_outer_size = (desired_inner_size + margin.sum()).at_least(min_size);
-        let (auto_id, outer_rect) = ui.allocate_space(desired_outer_size);
-        let rect = outer_rect - margin; // inner rect (excluding frame/margin).
         let min_inner_height = (desired_height_rows.at_least(1) as f32) * line_height;
 
         let id = id.unwrap_or_else(|| {
@@ -552,7 +547,6 @@ impl TextEdit<'_> {
         } else {
             Sense::hover()
         };
-        let mut response = ui.interact(outer_rect, id, sense);
 
         let mut state = TextEditState::load(ui.ctx(), id).unwrap_or_default();
         let mut cursor_range = None;
